@@ -3,6 +3,7 @@
     "target": "ES2022",
     "module": "CommonJS",
     "moduleResolution": "Node",
+    "baseUrl": ".",
     "lib": ["ES2022"],
     "declaration": true,
     "sourceMap": true,
@@ -14,6 +15,10 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "@media-ingest/core": ["packages/media-ingest-core/src/index.ts"],
+      "@media-ingest/core/*": ["packages/media-ingest-core/src/*"]
+    }
   }
 }
