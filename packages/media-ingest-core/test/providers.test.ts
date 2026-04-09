@@ -7,12 +7,51 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const {
   createTranscriptionMock,
   createResponseMock,
+  deleteFileMock,
+  generateContentMock,
+  recognizeMock,
   toFileMock,
+  uploadFileMock,
 } = vi.hoisted(() => ({
   createTranscriptionMock: vi.fn(),
   createResponseMock: vi.fn(),
+  deleteFileMock: vi.fn(),
+  generateContentMock: vi.fn(),
+  recognizeMock: vi.fn(),
   toFileMock: vi.fn(async (_contents: Buffer, fileName: string) => ({ fileName })),
+  uploadFileMock: vi.fn(),
 }));
+
+vi.mock('@google-cloud/speech', () => {
+  class MockSpeechClient {
+    public constructor(_config: unknown) {}
+    public recognize = recognizeMock;
+  }
+
+  return { SpeechClient: MockSpeechClient };
+});
+
+vi.mock('@google/genai', () => {
+  class MockGoogleGenAI {
+    public readonly files = {
+      upload: uploadFileMock,
+      delete: deleteFileMock,
+    };
+
+    public readonly models = {
+      generateContent: generateContentMock,
+    };
+
+    public constructor(_config: unknown) {}
+  }
+
+  return {
+    GoogleGenAI: MockGoogleGenAI,
+    createPartFromText: (text: string) => ({ text }),
+    createPartFromUri: (uri: string, mimeType: string) => ({ fileData: { uri, mimeType } }),
+    createUserContent: (parts: unknown[]) => ({ role: 'user', parts }),
+  };
+});
 
 vi.mock('openai', () => {
   class MockOpenAI {
@@ -36,6 +75,8 @@ import type { AppConfig } from '../src/config';
 import {
   ProviderRegistry,
   buildOpenAiTranscriptionRequestOptions,
+  normalizeOpenAiTranscriptionPayload,
+  providerCapabilityFor,
 } from '../src/providers';
 
 function createConfig(): AppConfig {
@@ -111,13 +152,39 @@ describe('OpenAI transcription request options', () => {
       response_format: 'diarized_json',
     });
   });
+
+  it('returns provider-specific capabilities for Gemini and Google Speech', () => {
+    expect(providerCapabilityFor('google-gemini')).toEqual({
+      maxWholeFileDurationMs: 20 * 60 * 1000,
+      chunkDurationMs: 10 * 60 * 1000,
+      overlapMs: 2_000,
+    });
+    expect(providerCapabilityFor('google-speech')).toEqual({
+      maxWholeFileDurationMs: 25 * 60 * 1000,
+      chunkDurationMs: 20 * 60 * 1000,
+      overlapMs: 2_000,
+    });
+  });
+
+  it('normalizes empty OpenAI payloads safely', () => {
+    expect(normalizeOpenAiTranscriptionPayload(null)).toEqual({
+      text: '',
+      detectedLanguage: null,
+      segments: [],
+      raw: null,
+    });
+  });
 });
 
 describe('OpenAI provider', () => {
   beforeEach(() => {
     createTranscriptionMock.mockReset();
     createResponseMock.mockReset();
+    deleteFileMock.mockReset();
+    generateContentMock.mockReset();
+    recognizeMock.mockReset();
     toFileMock.mockClear();
+    uploadFileMock.mockReset();
   });
 
   it('sends json response format for gpt-4o transcribe models', async () => {
@@ -189,5 +256,175 @@ describe('OpenAI provider', () => {
         speaker: 'speaker_1',
       },
     ]);
+  });
+});
+
+describe('Gemini provider', () => {
+  it('uses the Gemini SDK for transcription uploads and cleans up the uploaded file', async () => {
+    const fixtureDirectory = await mkdtemp(join(tmpdir(), 'media-ingest-gemini-'));
+    const filePath = join(fixtureDirectory, 'audio.mp3');
+    await writeFile(filePath, 'fake');
+
+    uploadFileMock.mockResolvedValue({
+      name: 'files/123',
+      uri: 'gs://files/123',
+      mimeType: 'audio/mpeg',
+    });
+    generateContentMock.mockResolvedValue({
+      text: JSON.stringify({
+        text: 'hello from gemini',
+        detectedLanguage: 'en',
+        segments: [{ startMs: 0, endMs: 1000, text: 'hello from gemini' }],
+      }),
+    });
+    deleteFileMock.mockResolvedValue({});
+
+    const provider = new ProviderRegistry(createConfig()).transcriptionProvider('google-gemini');
+    const result = await provider.transcribeChunk({
+      filePath,
+    });
+
+    expect(uploadFileMock).toHaveBeenCalledWith({
+      file: filePath,
+      config: { mimeType: 'audio/mpeg' },
+    });
+    expect(generateContentMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gemini-2.5-flash',
+        config: { responseMimeType: 'application/json' },
+      }),
+    );
+    expect(deleteFileMock).toHaveBeenCalledWith({ name: 'files/123' });
+    expect(result).toEqual(
+      expect.objectContaining({
+        text: 'hello from gemini',
+        detectedLanguage: 'en',
+        segments: [{ startMs: 0, endMs: 1000, text: 'hello from gemini' }],
+      }),
+    );
+  });
+
+  it('uses the Gemini SDK for video understanding', async () => {
+    const fixtureDirectory = await mkdtemp(join(tmpdir(), 'media-ingest-gemini-'));
+    const filePath = join(fixtureDirectory, 'video.mp4');
+    await writeFile(filePath, 'fake');
+
+    uploadFileMock.mockResolvedValue({
+      name: 'files/456',
+      uri: 'gs://files/456',
+      mimeType: 'video/mp4',
+    });
+    generateContentMock.mockResolvedValue({
+      text: JSON.stringify({
+        responseText: 'summary',
+        timeRanges: [{ startMs: 0, endMs: 5000, label: 'intro' }],
+      }),
+    });
+    deleteFileMock.mockResolvedValue({});
+
+    const provider = new ProviderRegistry(createConfig()).understandingProvider('google-gemini');
+    const result = await provider.understandChunk({
+      filePath,
+      prompt: 'Summarize the video.',
+    });
+
+    expect(uploadFileMock).toHaveBeenCalledWith({
+      file: filePath,
+      config: { mimeType: 'video/mp4' },
+    });
+    expect(result).toEqual({
+      responseText: 'summary',
+      timeRanges: [{ startMs: 0, endMs: 5000, label: 'intro' }],
+      raw: {
+        payload: {
+          responseText: 'summary',
+          timeRanges: [{ startMs: 0, endMs: 5000, label: 'intro' }],
+        },
+        uploadedFile: {
+          name: 'files/456',
+          uri: 'gs://files/456',
+          mimeType: 'video/mp4',
+        },
+      },
+    });
+  });
+
+  it('uses the Gemini SDK for translation', async () => {
+    generateContentMock.mockResolvedValue({
+      text: JSON.stringify({
+        translatedText: 'hola mundo',
+      }),
+    });
+
+    const provider = new ProviderRegistry(createConfig()).transcriptionProvider('google-gemini');
+    const translated = await provider.translateText?.({
+      text: 'hello world',
+      targetLanguage: 'es',
+    });
+
+    expect(generateContentMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gemini-2.5-pro',
+        config: { responseMimeType: 'application/json' },
+      }),
+    );
+    expect(translated).toBe('hola mundo');
+  });
+});
+
+describe('Google Speech provider', () => {
+  it('maps recognize responses into transcript segments', async () => {
+    const fixtureDirectory = await mkdtemp(join(tmpdir(), 'media-ingest-speech-'));
+    const filePath = join(fixtureDirectory, 'audio.mp3');
+    await writeFile(filePath, 'fake');
+
+    recognizeMock.mockResolvedValue([
+      {
+        results: [
+          {
+            languageCode: 'en-US',
+            alternatives: [
+              {
+                transcript: 'hello world',
+                words: [
+                  { startOffset: { seconds: 0 }, endOffset: { seconds: 1 } },
+                  { startOffset: { seconds: 1 }, endOffset: { seconds: 2 } },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const provider = new ProviderRegistry(createConfig()).transcriptionProvider('google-speech');
+    const result = await provider.transcribeChunk({ filePath });
+
+    expect(recognizeMock).toHaveBeenCalledOnce();
+    expect(result).toEqual(
+      expect.objectContaining({
+        text: 'hello world',
+        detectedLanguage: 'en-US',
+        segments: [{ startMs: 0, endMs: 2000, text: 'hello world' }],
+      }),
+    );
+  });
+});
+
+describe('Provider registry', () => {
+  it('falls back to OpenAI for translation when the preferred provider cannot translate', async () => {
+    createResponseMock.mockResolvedValue({ output_text: 'bonjour' });
+
+    const config = createConfig();
+    config.providers.gemini.enabled = false;
+    const registry = new ProviderRegistry(config);
+    const translated = await registry.translateWithBestAvailable({
+      preferredProvider: 'google-speech',
+      text: 'hello',
+      targetLanguage: 'fr',
+    });
+
+    expect(createResponseMock).toHaveBeenCalledOnce();
+    expect(translated).toBe('bonjour');
   });
 });
