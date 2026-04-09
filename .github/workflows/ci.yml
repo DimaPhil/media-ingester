@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'df/codex/**'
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      MEDIA_INGEST_CONFIG_PATH: config/app.example.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g pnpm@10.6.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test

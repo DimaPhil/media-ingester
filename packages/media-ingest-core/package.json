@@ -1,0 +1,23 @@
+{
+  "name": "@media-ingest/core",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "drizzle"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@google-cloud/speech": "^6.7.0",
+    "drizzle-orm": "^0.41.0",
+    "googleapis": "^148.0.0",
+    "openai": "^4.93.0",
+    "postgres": "^3.4.5",
+    "yaml": "^2.7.1",
+    "zod": "^3.24.2"
+  }
+}

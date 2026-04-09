@@ -1,0 +1,28 @@
+{
+  "name": "@media-ingest/api",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "types": "dist/main.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@media-ingest/core": "workspace:*",
+    "@nestjs/common": "^11.0.17",
+    "@nestjs/core": "^11.0.17",
+    "@nestjs/platform-express": "^11.0.17",
+    "@nestjs/schedule": "^5.0.1",
+    "cron": "^3.5.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11.0.17",
+    "supertest": "^7.1.0"
+  }
+}

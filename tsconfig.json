@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/media-ingest-core" },
+    { "path": "./packages/media-ingest-cli" },
+    { "path": "./apps/api" }
+  ]
+}

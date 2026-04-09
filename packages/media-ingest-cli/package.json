@@ -1,0 +1,19 @@
+{
+  "name": "@media-ingest/cli",
+  "version": "0.1.0",
+  "bin": {
+    "media-ingest": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "cli": "tsx src/index.ts",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@media-ingest/core": "workspace:*",
+    "commander": "^13.1.0",
+    "zod": "^3.24.2"
+  }
+}
