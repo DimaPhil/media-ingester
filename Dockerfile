@@ -8,7 +8,7 @@ RUN apt-get update \
   && npm install -g pnpm@10.6.1 \
   && rm -rf /var/lib/apt/lists/*
 
-COPY package.json pnpm-workspace.yaml tsconfig.base.json tsconfig.json vitest.config.ts eslint.config.mjs .prettierrc.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json vitest.config.ts eslint.config.mjs .prettierrc.json ./
 COPY apps ./apps
 COPY packages ./packages
 COPY config ./config
