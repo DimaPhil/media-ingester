@@ -13,13 +13,13 @@ describe('loadCliConfig', () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        apiBaseUrl: 'http://localhost:3000',
+        apiBaseUrl: 'http://localhost:4000',
         apiToken: 'secret',
       }),
     );
 
     await expect(loadCliConfig(configPath)).resolves.toEqual({
-      apiBaseUrl: 'http://localhost:3000',
+      apiBaseUrl: 'http://localhost:4000',
       apiToken: 'secret',
     });
   });

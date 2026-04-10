@@ -33,7 +33,7 @@ const configSchema = z.object({
   app: z.object({
     env: z.string().default('development'),
     host: z.string().default('0.0.0.0'),
-    port: z.number().int().positive().default(3000),
+    port: z.number().int().positive().default(4000),
     pollAfterMs: z.number().int().positive().default(1500),
   }),
   features: z.object({
@@ -226,7 +226,7 @@ export function loadAppConfig(options: LoadConfigOptions = {}): AppConfig {
     app: {
       env: 'development',
       host: '0.0.0.0',
-      port: 3000,
+      port: 4000,
       pollAfterMs: 1500,
     },
     features: {

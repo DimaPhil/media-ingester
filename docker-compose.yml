@@ -7,7 +7,7 @@ services:
       MEDIA_INGEST_CONFIG_PATH: /app/config/app.yaml
       YT_DLP_COOKIES_FROM_BROWSER: ${YT_DLP_COOKIES_FROM_BROWSER:-firefox}
     ports:
-      - '3000:3000'
+      - '4000:4000'
     volumes:
       - ./config/app.example.yaml:/app/config/app.yaml:ro
       - ${MEDIA_INGEST_FIREFOX_DIR}:/root/.mozilla/firefox:ro

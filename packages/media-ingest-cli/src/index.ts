@@ -38,7 +38,7 @@ async function apiRequest(
   cliConfigPath?: string,
 ): Promise<unknown> {
   const cliConfig = await loadCliConfig(cliConfigPath);
-  const baseUrl = cliConfig.apiBaseUrl ?? 'http://localhost:3000';
+  const baseUrl = cliConfig.apiBaseUrl ?? 'http://localhost:4000';
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {

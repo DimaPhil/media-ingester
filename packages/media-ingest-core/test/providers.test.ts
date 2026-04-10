@@ -84,7 +84,7 @@ function createConfig(): AppConfig {
     app: {
       env: 'test',
       host: '127.0.0.1',
-      port: 3000,
+      port: 4000,
       pollAfterMs: 10,
     },
     features: {
@@ -126,7 +126,7 @@ function createConfig(): AppConfig {
     },
     sources: {
       googleDrive: { enabled: true },
-      telegram: { enabled: true, baseUrl: 'http://localhost:8080', bearerToken: '' },
+      telegram: { enabled: true, baseUrl: 'http://localhost:4040', bearerToken: '' },
       ytDlp: { enabled: true, binaryPath: 'yt-dlp' },
       http: { enabled: true, timeoutMs: 1000 },
     },

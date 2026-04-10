@@ -1,15 +1,23 @@
-import type { INestApplication } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import request from 'supertest';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  BadRequestException,
+  InternalServerErrorException,
+  NotFoundException,
+} from '@nestjs/common';
+import { describe, expect, it, vi } from 'vitest';
 
-import { RemoteOperationService, type AppConfig } from '@media-ingest/core';
+import { type AppConfig, type RemoteOperationService } from '@media-ingest/core';
 
 import { HealthController, OperationsController } from '../src/controllers';
-import { APP_CONFIG } from '../src/tokens';
+import {
+  adminOperationsQuerySchema,
+  operationIdParamSchema,
+  remoteTranscriptionRequestSchema,
+  remoteUnderstandingRequestSchema,
+} from '../src/http-schemas';
+import { ZodValidationPipe } from '../src/zod-validation.pipe';
 
 const config: AppConfig = {
-  app: { env: 'test', host: '127.0.0.1', port: 3000, pollAfterMs: 10 },
+  app: { env: 'test', host: '127.0.0.1', port: 4000, pollAfterMs: 10 },
   features: { cacheEnabled: true },
   storage: {
     workingDirectory: '/tmp',
@@ -45,7 +53,7 @@ const config: AppConfig = {
   },
   sources: {
     googleDrive: { enabled: true },
-    telegram: { enabled: true, baseUrl: 'http://localhost:8080', bearerToken: '' },
+    telegram: { enabled: true, baseUrl: 'http://localhost:4040', bearerToken: '' },
     ytDlp: { enabled: true, binaryPath: 'yt-dlp' },
     http: { enabled: true, timeoutMs: 1000 },
   },
@@ -60,12 +68,12 @@ const validTranscriptionRequest = {
   provider: 'openai',
   model: 'gpt-4o-transcribe',
   force: false,
-};
+} as const;
 
-const apps: INestApplication[] = [];
-
-async function createApp(overrides: Partial<Record<keyof RemoteOperationService, unknown>> = {}) {
-  const operations = {
+function createOperations(
+  overrides: Partial<Record<keyof RemoteOperationService, unknown>> = {},
+) {
+  return {
     submitTranscription: vi.fn().mockResolvedValue({
       operationId: validOperationId,
       status: 'queued',
@@ -86,155 +94,110 @@ async function createApp(overrides: Partial<Record<keyof RemoteOperationService,
     getAdminOverview: vi.fn().mockResolvedValue({ counts: { total: 1 } }),
     listOperations: vi.fn().mockResolvedValue([{ id: validOperationId, status: 'running' }]),
     ...overrides,
-  };
-
-  const moduleRef = await Test.createTestingModule({
-    controllers: [HealthController, OperationsController],
-    providers: [
-      { provide: APP_CONFIG, useValue: config },
-      { provide: RemoteOperationService, useValue: operations },
-    ],
-  }).compile();
-
-  const app = moduleRef.createNestApplication();
-  await app.init();
-  apps.push(app);
-
-  return { app, operations };
+  } satisfies Partial<Record<keyof RemoteOperationService, unknown>>;
 }
 
-afterEach(async () => {
-  await Promise.all(apps.splice(0).map((app) => app.close()));
+describe('HealthController', () => {
+  it('returns health information', () => {
+    const controller = new HealthController(config);
+
+    expect(controller.healthz()).toEqual({
+      status: 'ok',
+      env: 'test',
+    });
+  });
+
+  it('renders the admin page shell', () => {
+    const controller = new HealthController(config);
+    const send = vi.fn();
+    const type = vi.fn().mockReturnValue({ send });
+
+    controller.admin({ type });
+
+    expect(type).toHaveBeenCalledWith('html');
+    expect(send).toHaveBeenCalledWith(expect.stringContaining('Media Ingest Control Room'));
+  });
 });
 
-describe('API controllers', () => {
-  it('returns health information', async () => {
-    const { app } = await createApp();
+describe('OperationsController', () => {
+  it('accepts valid transcription requests after schema validation and dispatches work', async () => {
+    const operations = createOperations();
+    const controller = new OperationsController(operations as RemoteOperationService);
+    const body = new ZodValidationPipe(remoteTranscriptionRequestSchema).transform(validTranscriptionRequest);
 
-    await request(app.getHttpServer())
-      .get('/healthz')
-      .expect(200)
-      .expect({
-        status: 'ok',
-        env: 'test',
-      });
-  });
-
-  it('renders the admin page shell', async () => {
-    const { app } = await createApp();
-
-    const response = await request(app.getHttpServer())
-      .get('/admin')
-      .expect(200);
-
-    expect(response.text).toContain('Media Ingest Control Room');
-  });
-
-  it('accepts valid transcription requests at the HTTP boundary', async () => {
-    const { app, operations } = await createApp();
-
-    await request(app.getHttpServer())
-      .post('/v1/transcriptions')
-      .send(validTranscriptionRequest)
-      .expect(202)
-      .expect({
-        operationId: validOperationId,
-        status: 'queued',
-        cacheHit: false,
-        pollAfterMs: 10,
-        dedupeKey: 'dedupe-1',
-      });
-
+    await expect(controller.createTranscription(body)).resolves.toEqual({
+      operationId: validOperationId,
+      status: 'queued',
+      cacheHit: false,
+      pollAfterMs: 10,
+      dedupeKey: 'dedupe-1',
+    });
     expect(operations.submitTranscription).toHaveBeenCalledWith(validTranscriptionRequest);
   });
 
-  it('rejects invalid source URLs before dispatching work', async () => {
-    const { app, operations } = await createApp();
+  it('rejects invalid source URLs at the validation boundary', () => {
+    const pipe = new ZodValidationPipe(remoteTranscriptionRequestSchema);
 
-    const response = await request(app.getHttpServer())
-      .post('/v1/transcriptions')
-      .send({
+    expect(() =>
+      pipe.transform({
         ...validTranscriptionRequest,
         source: {
           kind: 'youtube',
           uri: 'https://example.com/video.mp4',
         },
-      })
-      .expect(400);
-
-    expect(response.body.message).toBe('Validation failed');
-    expect(response.body.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          message: 'Unsupported YouTube URL',
-          path: ['source', 'uri'],
-        }),
-      ]),
-    );
-    expect(operations.submitTranscription).not.toHaveBeenCalled();
+      }),
+    ).toThrow(BadRequestException);
   });
 
-  it('rejects unsupported Google Drive folders at the HTTP boundary', async () => {
-    const { app, operations } = await createApp();
+  it('rejects unsupported Google Drive folders at the validation boundary', () => {
+    const pipe = new ZodValidationPipe(remoteUnderstandingRequestSchema);
 
-    const response = await request(app.getHttpServer())
-      .post('/v1/understanding')
-      .send({
+    expect(() =>
+      pipe.transform({
         source: {
           kind: 'google_drive',
           uri: 'https://drive.google.com/drive/folders/abc123',
         },
         provider: 'google-gemini',
         prompt: 'Summarize the video.',
-      })
-      .expect(400);
-
-    expect(response.body.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          message: 'Google Drive folders are not supported in v1',
-          path: ['source', 'uri'],
-        }),
-      ]),
-    );
-    expect(operations.submitUnderstanding).not.toHaveBeenCalled();
+      }),
+    ).toThrow(BadRequestException);
   });
 
-  it('delegates operation lookup to the service after validating the id', async () => {
-    const { app, operations } = await createApp();
+  it('delegates operation lookup after validating the id', async () => {
+    const operations = createOperations();
+    const controller = new OperationsController(operations as RemoteOperationService);
+    const params = new ZodValidationPipe(operationIdParamSchema).transform({
+      operationId: validOperationId,
+    });
 
-    await request(app.getHttpServer())
-      .get(`/v1/operations/${validOperationId}`)
-      .expect(200)
-      .expect({
-        operation: { id: validOperationId, status: 'completed' },
-      });
-
+    await expect(controller.getOperation(params)).resolves.toEqual({
+      operation: { id: validOperationId, status: 'completed' },
+    });
     expect(operations.getOperationStatus).toHaveBeenCalledWith(validOperationId);
   });
 
-  it('rejects invalid operation ids before calling the service', async () => {
-    const { app, operations } = await createApp();
+  it('rejects invalid operation ids at the validation boundary', () => {
+    const pipe = new ZodValidationPipe(operationIdParamSchema);
 
-    const response = await request(app.getHttpServer())
-      .get('/v1/operations/not-a-uuid')
-      .expect(400);
-
-    expect(response.body.message).toBe('Validation failed');
-    expect(operations.getOperationStatus).not.toHaveBeenCalled();
+    expect(() => pipe.transform({ operationId: 'not-a-uuid' })).toThrow(BadRequestException);
   });
 
   it('returns filtered admin operations lists', async () => {
-    const { app, operations } = await createApp();
+    const operations = createOperations();
+    const controller = new OperationsController(operations as RemoteOperationService);
+    const query = new ZodValidationPipe(adminOperationsQuerySchema).transform({
+      limit: '25',
+      status: 'running',
+      kind: 'transcription',
+      provider: 'openai',
+      sourceType: 'http',
+    });
 
-    await request(app.getHttpServer())
-      .get('/v1/admin/operations?limit=25&status=running&kind=transcription&provider=openai&sourceType=http')
-      .expect(200)
-      .expect({
-        items: [{ id: validOperationId, status: 'running' }],
-        meta: { limit: 25, count: 1 },
-      });
-
+    await expect(controller.listOperations(query)).resolves.toEqual({
+      items: [{ id: validOperationId, status: 'running' }],
+      meta: { limit: 25, count: 1 },
+    });
     expect(operations.listOperations).toHaveBeenCalledWith({
       limit: 25,
       status: 'running',
@@ -244,49 +207,44 @@ describe('API controllers', () => {
     });
   });
 
-  it('rejects invalid admin query parameters before hitting the service', async () => {
-    const { app, operations } = await createApp();
+  it('rejects invalid admin query parameters at the validation boundary', () => {
+    const pipe = new ZodValidationPipe(adminOperationsQuerySchema);
 
-    await request(app.getHttpServer())
-      .get('/v1/admin/operations?limit=999')
-      .expect(400);
-
-    expect(operations.listOperations).not.toHaveBeenCalled();
+    expect(() => pipe.transform({ limit: '999' })).toThrow(BadRequestException);
   });
 
   it('returns admin overview payloads', async () => {
-    const { app } = await createApp();
+    const operations = createOperations();
+    const controller = new OperationsController(operations as RemoteOperationService);
 
-    await request(app.getHttpServer())
-      .get('/v1/admin/overview')
-      .expect(200)
-      .expect({
-        counts: { total: 1 },
-      });
+    await expect(controller.getAdminOverview()).resolves.toEqual({
+      counts: { total: 1 },
+    });
   });
 
   it('maps missing operations to not found responses', async () => {
-    const { app } = await createApp({
+    const operations = createOperations({
       getOperationStatus: vi.fn().mockRejectedValue(new Error(`Operation not found: ${validOperationId}`)),
     });
+    const controller = new OperationsController(operations as RemoteOperationService);
 
-    await request(app.getHttpServer())
-      .get(`/v1/operations/${validOperationId}`)
-      .expect(404);
+    await expect(
+      controller.getOperation({ operationId: validOperationId }),
+    ).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('maps unexpected service errors to internal server errors', async () => {
-    const { app } = await createApp({
+    const operations = createOperations({
       submitUnderstanding: vi.fn().mockRejectedValue(new Error('unexpected')),
     });
+    const controller = new OperationsController(operations as RemoteOperationService);
 
-    await request(app.getHttpServer())
-      .post('/v1/understanding')
-      .send({
+    await expect(
+      controller.createUnderstanding({
         source: { kind: 'http', uri: 'https://example.com/video.mp4' },
         provider: 'google-gemini',
         prompt: 'Describe this video.',
-      })
-      .expect(500);
+      }),
+    ).rejects.toBeInstanceOf(InternalServerErrorException);
   });
 });

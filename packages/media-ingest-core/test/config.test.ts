@@ -31,7 +31,7 @@ describe.skip('loadAppConfig', () => {
         '    enabled: true',
         '  telegram:',
         '    enabled: true',
-        '    baseUrl: http://localhost:8080',
+        '    baseUrl: http://localhost:4040',
         '  ytDlp:',
         '    enabled: true',
         '  http:',
