@@ -1,57 +1,76 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { promisify } from 'node:util';
-import { execFile as execFileCb } from 'node:child_process';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { LocalMediaProcessor, RemoteOperationService } from '../src/pipeline';
 import { createFingerprint } from '../src/fingerprint';
 import type { AppConfig } from '../src/config';
+import type { MediaInspection, PlannedChunk } from '../src/media';
+import type * as MediaModule from '../src/media';
 import type { OperationStepName } from '../src/types';
+const fixtureInspections = new Map<string, MediaInspection>();
 
-const execFile = promisify(execFileCb);
+vi.mock('../src/media', async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof MediaModule;
 
-async function createAudioFixture(durationSeconds = 2): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), 'media-ingest-audio-'));
-  const path = join(directory, 'fixture.mp3');
-  await execFile('ffmpeg', [
-    '-y',
-    '-f',
-    'lavfi',
-    '-i',
-    `sine=frequency=1000:duration=${durationSeconds}`,
-    '-q:a',
-    '9',
-    '-acodec',
-    'libmp3lame',
-    path,
-  ]);
+  return {
+    ...actual,
+    probeMedia: vi.fn(async (path: string): Promise<MediaInspection> => {
+      const inspection = fixtureInspections.get(path);
+      if (!inspection) {
+        throw new Error(`Missing fixture inspection for ${path}`);
+      }
+      return inspection;
+    }),
+    createAudioChunk: vi.fn(
+      async (_inputPath: string, _chunk: PlannedChunk, outputPath: string): Promise<string> => {
+        await mkdir(dirname(outputPath), { recursive: true });
+        await writeFile(outputPath, 'audio-chunk');
+        return outputPath;
+      },
+    ),
+    createVideoChunk: vi.fn(
+      async (_inputPath: string, _chunk: PlannedChunk, outputPath: string): Promise<string> => {
+        await mkdir(dirname(outputPath), { recursive: true });
+        await writeFile(outputPath, 'video-chunk');
+        return outputPath;
+      },
+    ),
+  };
+});
+
+async function createFixture(
+  prefix: string,
+  fileName: string,
+  inspection: Omit<MediaInspection, 'path'>,
+): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  const path = join(directory, fileName);
+  await writeFile(path, 'fixture');
+  fixtureInspections.set(path, { path, ...inspection });
   return path;
 }
 
+async function createAudioFixture(durationSeconds = 2): Promise<string> {
+  return await createFixture('media-ingest-audio-', 'fixture.mp3', {
+    formatName: 'mp3',
+    durationMs: durationSeconds * 1000,
+    sizeBytes: 1024,
+    hasAudio: true,
+    hasVideo: false,
+  });
+}
+
 async function createVideoFixture(durationSeconds = 1): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), 'media-ingest-video-'));
-  const path = join(directory, 'fixture.mp4');
-  await execFile('ffmpeg', [
-    '-y',
-    '-f',
-    'lavfi',
-    '-i',
-    `testsrc=size=320x240:rate=25:duration=${durationSeconds}`,
-    '-f',
-    'lavfi',
-    '-i',
-    `sine=frequency=500:duration=${durationSeconds}`,
-    '-shortest',
-    '-c:v',
-    'libx264',
-    '-c:a',
-    'aac',
-    path,
-  ]);
-  return path;
+  return await createFixture('media-ingest-video-', 'fixture.mp4', {
+    formatName: 'mp4',
+    durationMs: durationSeconds * 1000,
+    sizeBytes: 2048,
+    hasAudio: true,
+    hasVideo: true,
+  });
 }
 
 async function waitFor<T>(producer: () => Promise<T>, predicate: (value: T) => boolean): Promise<T> {
@@ -318,6 +337,7 @@ describe('RemoteOperationService', () => {
 
   afterEach(async () => {
     for (const file of createdFiles) {
+      fixtureInspections.delete(file);
       await rm(dirname(file), { force: true, recursive: true }).catch(() => undefined);
     }
     createdFiles.length = 0;
@@ -953,7 +973,7 @@ describe('RemoteOperationService', () => {
     );
     const workingDirectory = join(config.storage.workingDirectory, 'expired-op');
     await rm(workingDirectory, { force: true, recursive: true }).catch(() => undefined);
-    await execFile('mkdir', ['-p', workingDirectory]);
+    await mkdir(workingDirectory, { recursive: true });
     const operation = await repository.createOperation({
       dedupeKey: 'expired',
       kind: 'transcription',
@@ -972,7 +992,7 @@ describe('RemoteOperationService', () => {
     await service.cleanupExpiredOperations();
 
     expect(await repository.findOperationById(operation.id)).toBeNull();
-    await expect(execFile('test', ['-d', workingDirectory])).rejects.toBeTruthy();
+    await expect(access(workingDirectory)).rejects.toBeTruthy();
   });
 });
 
