@@ -8,6 +8,7 @@ import { google } from 'googleapis';
 
 import type { AppConfig } from './config';
 import type { MediaSourceInput } from './contracts';
+import { buildStorageFileName, buildTelegramSourceNaming } from './source-naming';
 import { parseGoogleDriveFileId, parseTelegramUri } from './source-validation';
 import { YtDlpClient } from './yt-dlp';
 
@@ -16,6 +17,8 @@ export interface ResolvedSource {
   canonicalUri: string;
   displayName: string;
   fileName: string;
+  storageFileName?: string;
+  originFileName?: string;
   mimeType?: string;
   metadata: Record<string, unknown>;
 }
@@ -23,6 +26,7 @@ export interface ResolvedSource {
 export interface MaterializedSource {
   localPath: string;
   fileName: string;
+  originFileName?: string;
   mimeType?: string;
 }
 
@@ -57,10 +61,11 @@ function isReadableNodeStream(value: unknown): value is NodeJS.ReadableStream {
     && typeof value.pipe === 'function';
 }
 
-function requireSingleMedia(items: Array<{ media_id: string; file_name?: string; mime_type?: string }>): {
+function requireSingleMedia(items: Array<{ media_id: string; file_name?: string; mime_type?: string; extension?: string }>): {
   mediaId: string;
   fileName: string;
   mimeType?: string;
+  extension?: string;
 } {
   if (items.length === 0) {
     throw new Error('No media found for the specified Telegram post');
@@ -76,11 +81,8 @@ function requireSingleMedia(items: Array<{ media_id: string; file_name?: string;
     mediaId: item.media_id,
     fileName: item.file_name ?? `telegram-${item.media_id}`,
     mimeType: item.mime_type,
+    extension: item.extension,
   };
-}
-
-function safeFileName(name: string): string {
-  return name.replace(/[^\w.-]+/g, '_');
 }
 
 class LocalFileSourceResolver implements SourceResolver {
@@ -95,6 +97,7 @@ class LocalFileSourceResolver implements SourceResolver {
       canonicalUri: source.uri,
       displayName: basename(source.uri),
       fileName: basename(source.uri),
+      storageFileName: basename(source.uri),
       metadata: {},
     };
   }
@@ -104,12 +107,13 @@ class LocalFileSourceResolver implements SourceResolver {
     destinationDirectory: string,
     _operationKind: 'transcription' | 'understanding',
   ): Promise<MaterializedSource> {
-    const targetPath = join(destinationDirectory, safeFileName(source.fileName));
+    const targetPath = join(destinationDirectory, buildStorageFileName(source.storageFileName ?? source.fileName));
     await mkdir(destinationDirectory, { recursive: true });
     await copyFile(source.canonicalUri, targetPath);
     return {
       localPath: targetPath,
       fileName: source.fileName,
+      ...(source.originFileName ? { originFileName: source.originFileName } : {}),
       mimeType: source.mimeType,
     };
   }
@@ -136,6 +140,7 @@ class HttpSourceResolver implements SourceResolver {
       canonicalUri: parsed.toString(),
       displayName: basename(parsed.pathname) || parsed.hostname,
       fileName: basename(parsed.pathname) || 'remote-media',
+      storageFileName: basename(parsed.pathname) || 'remote-media',
       mimeType: head.headers.get('content-type') ?? undefined,
       metadata: {
         contentLength: head.headers.get('content-length'),
@@ -149,7 +154,7 @@ class HttpSourceResolver implements SourceResolver {
     _operationKind: 'transcription' | 'understanding',
   ): Promise<MaterializedSource> {
     await mkdir(destinationDirectory, { recursive: true });
-    const targetPath = join(destinationDirectory, safeFileName(source.fileName));
+    const targetPath = join(destinationDirectory, buildStorageFileName(source.storageFileName ?? source.fileName));
     const response = await fetch(source.canonicalUri, {
       signal: AbortSignal.timeout(this.config.sources.http.timeoutMs),
     });
@@ -157,6 +162,7 @@ class HttpSourceResolver implements SourceResolver {
     return {
       localPath: targetPath,
       fileName: source.fileName,
+      ...(source.originFileName ? { originFileName: source.originFileName } : {}),
       mimeType: source.mimeType,
     };
   }
@@ -180,6 +186,7 @@ class YtDlpSourceResolver implements SourceResolver {
       canonicalUri: metadata.canonicalUri,
       displayName: metadata.displayName,
       fileName: metadata.fileName,
+      storageFileName: metadata.fileName,
       metadata: metadata.metadata,
     };
   }
@@ -237,6 +244,7 @@ class GoogleDriveSourceResolver implements SourceResolver {
       canonicalUri: `google-drive://${response.data.id}`,
       displayName: response.data.name,
       fileName: response.data.name,
+      storageFileName: response.data.name,
       mimeType: response.data.mimeType ?? undefined,
       metadata: {
         fileId: response.data.id,
@@ -263,7 +271,7 @@ class GoogleDriveSourceResolver implements SourceResolver {
         responseType: 'stream',
       },
     );
-    const targetPath = join(destinationDirectory, safeFileName(source.fileName));
+    const targetPath = join(destinationDirectory, buildStorageFileName(source.storageFileName ?? source.fileName));
     if (!isReadableNodeStream(response.data)) {
       throw new Error('Drive download did not return a readable stream');
     }
@@ -271,6 +279,7 @@ class GoogleDriveSourceResolver implements SourceResolver {
     return {
       localPath: targetPath,
       fileName: source.fileName,
+      ...(source.originFileName ? { originFileName: source.originFileName } : {}),
       mimeType: source.mimeType,
     };
   }
@@ -315,29 +324,58 @@ class TelegramSourceResolver implements SourceResolver {
     if (!chatId) {
       throw new Error('Telegram chat could not be resolved');
     }
-    const mediaResponse = await fetch(
-      `${this.config.sources.telegram.baseUrl}/chats/${encodeURIComponent(chatId)}/messages/${parsed.messageId}/media`,
-      {
-        headers: this.headers(),
-      },
-    );
+    const [messageResponse, mediaResponse] = await Promise.all([
+      fetch(
+        `${this.config.sources.telegram.baseUrl}/chats/${encodeURIComponent(chatId)}/messages/${parsed.messageId}`,
+        {
+          headers: this.headers(),
+        },
+      ),
+      fetch(
+        `${this.config.sources.telegram.baseUrl}/chats/${encodeURIComponent(chatId)}/messages/${parsed.messageId}/media`,
+        {
+          headers: this.headers(),
+        },
+      ),
+    ]);
+    if (!messageResponse.ok) {
+      throw new Error(`Telegram message detail failed with status ${messageResponse.status}`);
+    }
     if (!mediaResponse.ok) {
       throw new Error(`Telegram media manifest failed with status ${mediaResponse.status}`);
     }
+    const messagePayload = (await messageResponse.json()) as {
+      data?: {
+        text?: string;
+      };
+    };
     const mediaPayload = (await mediaResponse.json()) as {
-      data?: Array<{ media_id: string; file_name?: string; mime_type?: string }>;
+      data?: Array<{ media_id: string; file_name?: string; mime_type?: string; extension?: string }>;
     };
     const media = requireSingleMedia(mediaPayload.data ?? []);
+    const naming = buildTelegramSourceNaming({
+      chatId,
+      messageId: parsed.messageId,
+      mediaId: media.mediaId,
+      messageText: messagePayload.data?.text,
+      originFileName: media.fileName,
+      extension: media.extension,
+    });
     return {
       kind: source.kind,
       canonicalUri: `telegram://${chatId}/${parsed.messageId}/${media.mediaId}`,
-      displayName: resolvePayload.data?.peer?.display_name ?? source.uri,
-      fileName: media.fileName,
+      displayName: naming.displayName,
+      fileName: naming.fileName,
+      storageFileName: naming.storageFileName,
+      ...(naming.originFileName ? { originFileName: naming.originFileName } : {}),
       mimeType: media.mimeType,
       metadata: {
         chatId,
         messageId: parsed.messageId,
         mediaId: media.mediaId,
+        ...(messagePayload.data?.text ? { messageText: messagePayload.data.text } : {}),
+        ...(naming.originFileName ? { originFileName: naming.originFileName } : {}),
+        peerDisplayName: resolvePayload.data?.peer?.display_name ?? null,
       },
     };
   }
@@ -348,7 +386,7 @@ class TelegramSourceResolver implements SourceResolver {
     _operationKind: 'transcription' | 'understanding',
   ): Promise<MaterializedSource> {
     await mkdir(destinationDirectory, { recursive: true });
-    const targetPath = join(destinationDirectory, safeFileName(source.fileName));
+    const targetPath = join(destinationDirectory, buildStorageFileName(source.storageFileName ?? source.fileName));
     const response = await fetch(
       `${this.config.sources.telegram.baseUrl}/chats/${encodeURIComponent(String(source.metadata.chatId))}/messages/${String(source.metadata.messageId)}/media/${String(source.metadata.mediaId)}`,
       {
@@ -359,6 +397,7 @@ class TelegramSourceResolver implements SourceResolver {
     return {
       localPath: targetPath,
       fileName: source.fileName,
+      ...(source.originFileName ? { originFileName: source.originFileName } : {}),
       mimeType: source.mimeType,
     };
   }

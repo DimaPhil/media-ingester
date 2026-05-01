@@ -140,6 +140,8 @@ function isResolvedSource(value: unknown): value is ResolvedSource {
     && isString(value.canonicalUri)
     && isString(value.displayName)
     && isString(value.fileName)
+    && (value.storageFileName === undefined || isString(value.storageFileName))
+    && (value.originFileName === undefined || isString(value.originFileName))
     && (value.mimeType === undefined || isString(value.mimeType))
     && isRecord(value.metadata);
 }
@@ -148,6 +150,7 @@ function isMaterializedSource(value: unknown): value is MaterializedSource {
   return isRecord(value)
     && isString(value.localPath)
     && isString(value.fileName)
+    && (value.originFileName === undefined || isString(value.originFileName))
     && (value.mimeType === undefined || isString(value.mimeType));
 }
 
