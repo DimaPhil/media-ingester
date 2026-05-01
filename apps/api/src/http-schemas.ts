@@ -4,6 +4,7 @@ import {
   operationKinds,
   operationStatuses,
   providerIds,
+  remoteSourceSchema,
   remoteTranscriptionRequestSchema,
   remoteUnderstandingRequestSchema,
   sourceKinds,
@@ -21,7 +22,12 @@ export const adminOperationsQuerySchema = z.object({
   sourceType: z.enum(sourceKinds).optional(),
 });
 
+export const sourceResolveRequestSchema = z.object({
+  source: remoteSourceSchema,
+});
+
 export { remoteTranscriptionRequestSchema, remoteUnderstandingRequestSchema };
 
 export type OperationIdParam = z.infer<typeof operationIdParamSchema>;
 export type AdminOperationsQuery = z.infer<typeof adminOperationsQuerySchema>;
+export type SourceResolveRequest = z.infer<typeof sourceResolveRequestSchema>;

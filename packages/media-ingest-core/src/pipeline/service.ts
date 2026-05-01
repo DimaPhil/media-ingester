@@ -1,7 +1,9 @@
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { AsyncLimiter } from '../async';
 import type {
+  RemoteMediaSourceInput,
   RemoteTranscriptionRequest,
   RemoteUnderstandingRequest,
 } from '../contracts';
@@ -185,6 +187,28 @@ interface PreparedRequestContext {
   cacheKey: string;
 }
 
+type RemoteOperationRequest = RemoteTranscriptionRequest | RemoteUnderstandingRequest;
+
+export interface ResolvedSourceView {
+  kind: ResolvedSource['kind'];
+  canonicalUri: string;
+  displayName: string;
+  fileName: string;
+  storageFileName?: string;
+  originFileName?: string;
+  mimeType?: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface PreparedSourceDownload {
+  localPath: string;
+  fileName: string;
+  originFileName?: string;
+  mimeType?: string;
+  sizeBytes: number;
+  cleanup: () => Promise<void>;
+}
+
 export class RemoteOperationService {
   private readonly runner: PipelineRunner;
 
@@ -216,6 +240,49 @@ export class RemoteOperationService {
 
   public async submitUnderstanding(request: RemoteUnderstandingRequest): Promise<SubmitOperationResponse> {
     return this.submitOperation('understanding', request);
+  }
+
+  public async resolveSource(source: RemoteMediaSourceInput): Promise<ResolvedSourceView> {
+    const resolvedSource = await this.resolveRemoteSource(source);
+    return {
+      kind: resolvedSource.kind,
+      canonicalUri: resolvedSource.canonicalUri,
+      displayName: resolvedSource.displayName,
+      fileName: resolvedSource.fileName,
+      ...(resolvedSource.storageFileName ? { storageFileName: resolvedSource.storageFileName } : {}),
+      ...(resolvedSource.originFileName ? { originFileName: resolvedSource.originFileName } : {}),
+      ...(resolvedSource.mimeType ? { mimeType: resolvedSource.mimeType } : {}),
+      metadata: resolvedSource.metadata,
+    };
+  }
+
+  public async prepareDownload(source: RemoteMediaSourceInput): Promise<PreparedSourceDownload> {
+    const resolvedSource = await this.resolveRemoteSource(source);
+    const resolver = this.sources.resolverFor(source);
+    const workingDirectory = join(
+      this.config.storage.workingDirectory,
+      `download-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    );
+    await ensureDirectory(workingDirectory);
+    try {
+      const materialized = await this.sourceResolverLimiter.run(() =>
+        resolver.materialize(resolvedSource, workingDirectory, 'transcription'),
+      );
+      const fileStats = await stat(materialized.localPath);
+      return {
+        localPath: materialized.localPath,
+        fileName: materialized.fileName,
+        ...(materialized.originFileName ? { originFileName: materialized.originFileName } : {}),
+        ...(materialized.mimeType ? { mimeType: materialized.mimeType } : {}),
+        sizeBytes: fileStats.size,
+        cleanup: async () => {
+          await safeRemove(workingDirectory);
+        },
+      };
+    } catch (error) {
+      await safeRemove(workingDirectory);
+      throw error;
+    }
   }
 
   public async getOperationStatus(operationId: string): Promise<OperationStatusView> {
@@ -315,7 +382,7 @@ export class RemoteOperationService {
 
   private async submitOperation(
     kind: OperationKind,
-    request: AnyRequest,
+    request: RemoteOperationRequest,
   ): Promise<SubmitOperationResponse> {
     const prepared = await this.prepareRequest(kind, request);
     const dedupeKey = prepared.cacheKey;
@@ -364,7 +431,7 @@ export class RemoteOperationService {
 
   private async createAndQueueOperation(
     kind: OperationKind,
-    request: AnyRequest,
+    request: RemoteOperationRequest,
     prepared: PreparedRequestContext,
     dedupeKey: string,
     cacheEnabled: boolean,
@@ -408,7 +475,7 @@ export class RemoteOperationService {
 
   private async createCompletedCachedOperation(
     kind: OperationKind,
-    request: AnyRequest,
+    request: RemoteOperationRequest,
     prepared: PreparedRequestContext,
     durableResult: PersistedDurableResult,
   ): Promise<SubmitOperationResponse> {
@@ -452,10 +519,9 @@ export class RemoteOperationService {
 
   private async prepareRequest(
     kind: OperationKind,
-    request: AnyRequest,
+    request: RemoteOperationRequest,
   ): Promise<PreparedRequestContext> {
-    const resolver = this.sources.resolverFor(request.source);
-    const resolvedSource = await this.sourceResolverLimiter.run(() => resolver.resolve(request.source));
+    const resolvedSource = await this.resolveRemoteSource(request.source);
     const mediaResource = await this.repository.upsertMediaResource({
       resourceKey: buildResourceKey(resolvedSource),
       kind: resolvedSource.kind,
@@ -472,6 +538,11 @@ export class RemoteOperationService {
       mediaResource,
       cacheKey: buildNormalizedCacheKey(kind, request, resolvedSource),
     };
+  }
+
+  private async resolveRemoteSource(source: RemoteMediaSourceInput): Promise<ResolvedSource> {
+    const resolver = this.sources.resolverFor(source);
+    return this.sourceResolverLimiter.run(() => resolver.resolve(source));
   }
 
   private queueOperation(operationId: string): void {

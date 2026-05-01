@@ -13,6 +13,7 @@ import {
   operationIdParamSchema,
   remoteTranscriptionRequestSchema,
   remoteUnderstandingRequestSchema,
+  sourceResolveRequestSchema,
 } from '../src/http-schemas';
 import { ZodValidationPipe } from '../src/zod-validation.pipe';
 
@@ -94,6 +95,23 @@ function createOperations(
       cacheHit: false,
       pollAfterMs: 10,
       dedupeKey: 'dedupe-2',
+    }),
+    resolveSource: vi.fn().mockResolvedValue({
+      kind: 'telegram',
+      canonicalUri: 'telegram://1/2/2:0',
+      displayName: 'Lesson',
+      fileName: 'Lesson.mp4',
+      storageFileName: 'telegram-1-2-2-0.mp4',
+      originFileName: '18 old name.mp4',
+      mimeType: 'video/mp4',
+      metadata: {},
+    }),
+    prepareDownload: vi.fn().mockResolvedValue({
+      localPath: '/tmp/download.mp4',
+      fileName: 'Lesson.mp4',
+      mimeType: 'video/mp4',
+      sizeBytes: 123,
+      cleanup: vi.fn().mockResolvedValue(undefined),
     }),
     getOperationStatus: vi.fn().mockResolvedValue({
       operation: { id: validOperationId, status: 'completed' },
@@ -227,6 +245,37 @@ describe('OperationsController', () => {
     await expect(controller.getAdminOverview()).resolves.toEqual({
       counts: { total: 1 },
     });
+  });
+
+  it('resolves remote source metadata through the API boundary', async () => {
+    const operations = createOperations();
+    const controller = new OperationsController(operations as RemoteOperationService);
+    const body = new ZodValidationPipe(sourceResolveRequestSchema).transform({
+      source: {
+        kind: 'telegram',
+        uri: 'https://t.me/c/2108353345/3442',
+      },
+    });
+
+    await expect(controller.resolveSource(body)).resolves.toMatchObject({
+      kind: 'telegram',
+      fileName: 'Lesson.mp4',
+      originFileName: '18 old name.mp4',
+    });
+    expect(operations.resolveSource).toHaveBeenCalledWith(body.source);
+  });
+
+  it('rejects invalid resolve/download source requests at the validation boundary', () => {
+    const pipe = new ZodValidationPipe(sourceResolveRequestSchema);
+
+    expect(() =>
+      pipe.transform({
+        source: {
+          kind: 'telegram',
+          uri: 'https://example.com/not-telegram',
+        },
+      }),
+    ).toThrow(BadRequestException);
   });
 
   it('maps missing operations to not found responses', async () => {

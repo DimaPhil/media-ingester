@@ -12,6 +12,7 @@ import {
   Query,
   Res,
 } from '@nestjs/common';
+import { createReadStream } from 'node:fs';
 
 import {
   RemoteOperationService,
@@ -24,11 +25,20 @@ import {
   operationIdParamSchema,
   remoteTranscriptionRequestSchema,
   remoteUnderstandingRequestSchema,
+  sourceResolveRequestSchema,
   type AdminOperationsQuery,
   type OperationIdParam,
+  type SourceResolveRequest,
 } from './http-schemas';
 import { APP_CONFIG } from './tokens';
 import { ZodValidationPipe } from './zod-validation.pipe';
+
+function buildContentDisposition(fileName: string): string {
+  const asciiFallback = Array.from(fileName)
+    .map((char) => (32 <= char.charCodeAt(0) && char.charCodeAt(0) < 127 && char !== '"' && char !== '\\' ? char : '_'))
+    .join('');
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+}
 
 @Controller()
 export class HealthController {
@@ -82,6 +92,47 @@ export class OperationsController {
   ) {
     try {
       return await this.operations.submitUnderstanding(body);
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  @Post('/sources/resolve')
+  public async resolveSource(
+    @Body(new ZodValidationPipe(sourceResolveRequestSchema))
+    body: SourceResolveRequest,
+  ) {
+    try {
+      return await this.operations.resolveSource(body.source);
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  @Post('/downloads')
+  public async downloadSource(
+    @Body(new ZodValidationPipe(sourceResolveRequestSchema))
+    body: SourceResolveRequest,
+    @Res()
+    response: {
+      setHeader(name: string, value: number | string): unknown;
+      status(code: number): { end(): unknown };
+      on(event: 'close' | 'finish', listener: () => void): unknown;
+      end(): unknown;
+    },
+  ) {
+    try {
+      const prepared = await this.operations.prepareDownload(body.source);
+      response.setHeader('Content-Type', prepared.mimeType ?? 'application/octet-stream');
+      response.setHeader('Content-Disposition', buildContentDisposition(prepared.fileName));
+      response.setHeader('Content-Length', prepared.sizeBytes);
+      const cleanup = () => {
+        void prepared.cleanup();
+      };
+      response.on('close', cleanup);
+      response.on('finish', cleanup);
+      const writableResponse = response as unknown as NodeJS.WritableStream;
+      createReadStream(prepared.localPath).pipe(writableResponse);
     } catch (error) {
       throw this.mapError(error);
     }
