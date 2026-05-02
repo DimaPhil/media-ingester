@@ -2,6 +2,7 @@ services:
   api:
     build:
       context: .
+    restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
       MEDIA_INGEST_CONFIG_PATH: /app/config/app.yaml
