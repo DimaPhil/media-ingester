@@ -8,7 +8,7 @@ services:
       MEDIA_INGEST_CONFIG_PATH: /app/config/app.yaml
       YT_DLP_COOKIES_FROM_BROWSER: ${YT_DLP_COOKIES_FROM_BROWSER:-firefox}
     ports:
-      - '4000:4000'
+      - '127.0.0.1:4000:4000'  # tailnet access: tailscale serve --tcp 4000
     volumes:
       - ./config/app.yaml:/app/config/app.yaml:ro
       - ${MEDIA_INGEST_FIREFOX_DIR}:/root/.mozilla/firefox:ro
