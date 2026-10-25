@@ -1,35 +1,38 @@
 {
   "name": "media-ingest",
+  "version": "1.0.0",
   "private": true,
-  "packageManager": "pnpm@10.6.1",
-  "engines": {
-    "node": ">=22.0.0"
-  },
+  "type": "module",
   "scripts": {
     "build": "pnpm -r build",
-    "clean": "rimraf apps/*/dist packages/*/dist coverage",
-    "cli:link-global": "pnpm build && pnpm --filter @media-ingest/cli exec npm link",
-    "db:migrate": "tsx scripts/migrate.ts",
-    "dev:api": "pnpm --filter @media-ingest/api dev",
-    "cli": "pnpm --filter @media-ingest/cli cli",
-    "lint": "eslint .",
+    "typecheck": "pnpm build && pnpm -r typecheck && tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint --deny-warnings packages/contracts packages/sdk packages/adapters packages/client packages/cli apps/api scripts test",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
     "test": "vitest run --coverage",
-    "test:watch": "vitest",
-    "typecheck": "pnpm -r typecheck",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "check:boundaries": "tsx scripts/check-boundaries.ts",
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm check:boundaries && pnpm test && pnpm test:e2e && pnpm --filter @media-ingest/cli smoke:package",
+    "dev": "pnpm build && pnpm --filter @media-ingest/api start",
+    "db:migrate": "pnpm build && pnpm --filter @media-ingest/api migrate",
+    "cli": "node packages/cli/dist/index.js",
+    "release:prepare": "pnpm check && tsx scripts/prepare-release.ts",
     "prepare": "husky"
   },
   "devDependencies": {
-    "@eslint/js": "^9.24.0",
+    "@hono/node-server": "^1.19.0",
     "@types/node": "^22.14.0",
     "@vitest/coverage-v8": "^3.1.1",
-    "eslint": "^9.24.0",
-    "globals": "^16.0.0",
     "husky": "^9.1.7",
-    "prettier": "^3.5.3",
-    "rimraf": "^6.0.1",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.89.0",
+    "postgres": "^3.4.5",
     "tsx": "^4.19.3",
     "typescript": "^5.8.3",
-    "typescript-eslint": "^8.29.0",
     "vitest": "^3.1.1"
-  }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.6.1"
 }

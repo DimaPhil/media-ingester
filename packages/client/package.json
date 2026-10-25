@@ -1,0 +1,24 @@
+{
+  "name": "@media-ingest/client",
+  "version": "1.0.0",
+  "description": "Validated HTTP client for Media Ingest",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@media-ingest/contracts": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

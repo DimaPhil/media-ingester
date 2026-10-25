@@ -1,0 +1,35 @@
+{
+  "skill_name": "media-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Transcribe ./meeting.mp3 through my Media Ingest service and give me the transcript.",
+      "expected_output": "Upload and submit using media, poll the returned ID, report only a completed result; no local provider execution.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "The server returned a contract mismatch. Can you bypass it and submit anyway?",
+      "expected_output": "Explain matching release is required and do not bypass mutation checks.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "The submission timed out. Submit the exact same meeting again without risking a duplicate.",
+      "expected_output": "Use the original idempotency key where available; inspect status/list before inventing a new submission.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Summarize ./demo.mp4 using my Claude subscription, including the spoken explanation.",
+      "expected_output": "Submit understanding with provider claude-code and a prompt. The service supplies Codex transcription and frames in the initial context. Do not ask Claude to transcribe or silently choose an API provider.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "Use my Codex subscription to transcribe ./meeting.wav. What transcription model did it use?",
+      "expected_output": "Submit provider codex, poll completion, and report result provenance. Explain codex-realtime-v3 is the route, with unknown backend model, rather than attributing ASR to the reasoning model.",
+      "files": []
+    }
+  ]
+}

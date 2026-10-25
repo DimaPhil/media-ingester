@@ -1,0 +1,30 @@
+{
+  "name": "@media-ingest/cli",
+  "version": "1.0.0",
+  "description": "HTTP-only Media Ingest CLI with bundled agent skill",
+  "bin": {
+    "media": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "scripts",
+    ".agents/skills/media-cli",
+    "README.md"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke:package": "node scripts/smoke-package.mjs",
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "devDependencies": {
+    "@media-ingest/client": "workspace:*",
+    "@media-ingest/contracts": "workspace:*",
+    "commander": "^14.0.0",
+    "esbuild": "^0.28.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

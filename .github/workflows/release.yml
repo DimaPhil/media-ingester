@@ -1,0 +1,46 @@
+name: Release API and CLI
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: media_ingest_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:test-only@localhost:5432/media_ingest_test
+      MEDIA_SKIP_SKILL_INSTALL: '1'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.1
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm release:prepare
+      - name: Build matching server image
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -t "media-ingest:$version" .
+          docker save "media-ingest:$version" | gzip > "release/$version/media-ingest-api-$version.tar.gz"
+          sha256sum "release/$version/"* > "release/$version/SHA256SUMS"
+      - name: Publish complete release set
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" --draft --title "Media Ingest $version" --notes "API image, CLI and libraries built and verified from $GITHUB_SHA. See release.json and SHA256SUMS."
+          gh release upload "$GITHUB_REF_NAME" "release/$version/"*
+          gh release edit "$GITHUB_REF_NAME" --draft=false

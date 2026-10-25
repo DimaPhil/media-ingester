@@ -1,0 +1,11 @@
+# Private owner authentication
+
+`createAuth` is a Fetch-compatible authorization server and resource authentication boundary. Mount `handle(request)` before API/MCP routes; a null response means the route belongs to the application. Call `authenticate(request, publicUrl)` for REST and `authenticate(request, publicUrl + '/mcp')` for MCP, then enforce the operation catalog scope. Owner API tokens can access both resources. OAuth tokens are bound to one exact resource and their approved scopes.
+
+Set a random owner token of at least 32 characters and an HTTPS public origin. HTTP loopback is accepted for development only. Protect incoming Host/Origin at the server composition layer. Credentials never appear in redirects or stored plaintext; access tokens and codes use SHA-256 storage keys. The owner token is entered only into the server's consent page. Approval requires a same-origin POST plus a one-use browser-cookie-bound consent record. Invalid redirects are never followed.
+
+OAuth supports public clients, authorization-code grants, S256 PKCE, one-hour opaque access tokens and revocation. Refresh tokens are deliberately absent; discovery advertises only implemented grant types. DCR registrations expire after 30 days and can be registered again. Native DCR supports HTTP loopback redirects; all other redirects require HTTPS and exact matching. Codes expire after 60 seconds and are atomically consumed, including failed exchange attempts.
+
+Client ID metadata documents require an exact matching `client_id`, a name and redirect URIs. Retrieval pins a public IPv4 address after DNS resolution, rejects mixed private/public DNS answers, disallows redirects, accepts JSON only and limits responses to 64 KiB and five seconds. IPv6-only metadata hosts are currently unsupported. No metadata request receives a credential. Tests may inject an equally constrained metadata fetcher.
+
+Production supplies a PostgreSQL `AuthStore`: `take` must atomically consume records across processes and `get`/`take` must filter expiration. `MemoryAuthStore` is for tests or one-process embedding. Expired records should be pruned by the database adapter. A per-process public authorization limit reduces accidental abuse; the deployment ingress should enforce shared rate limits for internet-facing installations.
