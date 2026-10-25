@@ -9,3 +9,8 @@ tmp
 *.log
 .pnpm-store
 *.tsbuildinfo
+.media
+release
+!.artifact-review/
+.artifact-review/*
+!.artifact-review/architecture.html
