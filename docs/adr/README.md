@@ -7,5 +7,6 @@
 | [0003 · Fence durable work and checkpoint each chunk](0003-worker-recovery.md)              | Persistence, retries, concurrency or idempotency       |
 | [0004 · Run subscriptions through isolated native clients](0004-subscription-clients.md)    | Codex, Claude Code, authentication, ASR or translation |
 | [0005 · Run a single-owner container with durable storage](0005-deployment-and-identity.md) | Ubuntu, Neon, ingress, owner access or OAuth identity  |
+| [0006 · Release uploaded inputs after successful processing](0006-upload-retention.md)      | Upload ownership, shared inputs, retry or cleanup      |
 
 These records explain accepted choices. For a change that alters a boundary or recovery guarantee, add a numbered record with status, context, decision, consequences, and links to the implementing code and tests. If a new decision replaces one here, mark the earlier record superseded and link both ways. Keep operational procedures in the [README](../../README.md) and implementation navigation in the [agent guide](../agent-context.md).

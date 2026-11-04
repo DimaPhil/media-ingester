@@ -11,6 +11,7 @@ import type {
   Lease,
   ListJobs,
 } from '@media-ingest/sdk';
+import type { PostgresUploadRetention } from './upload-retention.js';
 
 export { applyMigrations } from './migrations.js';
 export { PostgresAuthStore } from './postgres-auth-store.js';
@@ -52,6 +53,7 @@ export class PostgresJobRepository implements JobRepository {
   constructor(
     private readonly sql: Sql,
     private readonly clock?: () => number,
+    private readonly uploads?: Pick<PostgresUploadRetention, 'submitted' | 'completed'>,
   ) {}
 
   async enqueue(job: JobRecord): Promise<JobRecord> {
@@ -61,18 +63,20 @@ export class PostgresJobRepository implements JobRepository {
         VALUES (${job.id}, ${job.ownerId}, ${job.idempotencyKey ?? null}, ${job.status},
           ${job.leaseToken}, ${job.leaseExpiresAt}, ${job.createdAt}, ${transaction.json(JSON.parse(JSON.stringify(job)))})
         ON CONFLICT (owner_id, idempotency_key) DO NOTHING RETURNING data`;
-      if (inserted[0]) return inserted[0].data;
-      const existing = data(
-        await transaction<JobRow[]>`SELECT data FROM media_v1.jobs
-        WHERE owner_id=${job.ownerId} AND idempotency_key=${job.idempotencyKey ?? null}`,
-      );
-      if (!existing || existing.requestHash !== job.requestHash) {
+      const accepted =
+        data(inserted) ??
+        data(
+          await transaction<JobRow[]>`SELECT data FROM media_v1.jobs
+          WHERE owner_id=${job.ownerId} AND idempotency_key=${job.idempotencyKey ?? null} FOR SHARE`,
+        );
+      if (!accepted || accepted.requestHash !== job.requestHash) {
         throw new MediaError(
           'idempotency_conflict',
           'Idempotency key was already used with a different request',
         );
       }
-      return existing;
+      await this.uploads?.submitted(transaction, accepted, inserted.length > 0);
+      return accepted;
     });
   }
 
@@ -122,7 +126,7 @@ export class PostgresJobRepository implements JobRepository {
   private async fenced(
     id: string,
     token: string,
-    update: (job: JobRecord, now: number) => void,
+    update: (job: JobRecord, now: number, transaction: TransactionSql) => void | Promise<void>,
   ): Promise<void> {
     await this.sql.begin(async (transaction) => {
       const job = data(
@@ -132,7 +136,7 @@ export class PostgresJobRepository implements JobRepository {
       if (!job) throw new LeaseLostError();
       const now = await readClock(transaction, this.clock);
       if (job.leaseExpiresAt === null || job.leaseExpiresAt <= now) throw new LeaseLostError();
-      update(job, now);
+      await update(job, now, transaction);
       job.updatedAt = new Date(now).toISOString();
       await writeJob(transaction, job, { token, clock: this.clock });
     });
@@ -180,7 +184,7 @@ export class PostgresJobRepository implements JobRepository {
   }
 
   async complete(id: string, token: string, result: MediaResult, _now: number): Promise<void> {
-    await this.fenced(id, token, (job) => {
+    await this.fenced(id, token, async (job, _now, transaction) => {
       if (!job.plan || job.plan.length !== Object.keys(job.chunks).length)
         throw new MediaError('incomplete_job', 'Cannot complete a job with missing chunks');
       Object.assign(job, {
@@ -190,6 +194,8 @@ export class PostgresJobRepository implements JobRepository {
         leaseToken: null,
         leaseExpiresAt: null,
       });
+      // The final fenced write also rolls back this intent if the lease expired while waiting.
+      await this.uploads?.completed(transaction, job);
     });
   }
 

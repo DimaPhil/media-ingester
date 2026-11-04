@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -69,6 +69,72 @@ describe('owned media files', () => {
     await writeFile(metadata.path, 'unexpected');
     await expect(files.upload('owner', 'clip.mp3', data)).rejects.toThrow('does not match');
     expect(await readFile(metadata.path, 'utf8')).toBe('unexpected');
+  });
+
+  it('deletes only the addressed owner upload and leaves the attempt copy usable', async () => {
+    const { root, files, context } = await setup();
+    const data = Buffer.from('original').toString('base64');
+    const { source } = await files.upload(context.ownerId, 'clip.mp3', data);
+    const other = await files.upload('other', 'clip.mp3', data);
+    const sources = new NodeSources({ files });
+    const artifact = await sources.materialize(await sources.resolve(source, context), context);
+    await symlink(join(root, 'uploads', context.ownerId), join(root, 'uploads', 'alias'));
+    await expect(files.removeUpload('alias', source.uri)).rejects.toThrow(
+      'Invalid upload directory',
+    );
+    await expect(files.removeUpload(context.ownerId, '../../')).rejects.toThrow(
+      'Invalid upload id',
+    );
+    await files.removeUpload('other', source.uri);
+    await files.removeUpload(context.ownerId.toUpperCase(), source.uri);
+    await expect(
+      files.uploadMetadata(context.ownerId.toUpperCase(), source.uri),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    expect(await files.uploadMetadata(context.ownerId, source.uri)).toMatchObject({
+      fileName: 'clip.mp3',
+    });
+    await files.removeUpload(context.ownerId, source.uri);
+    await files.removeUpload(context.ownerId, source.uri);
+    await expect(files.uploadMetadata(context.ownerId, source.uri)).rejects.toMatchObject({
+      code: 'not_found',
+    });
+    expect(await readFile(artifact.uri, 'utf8')).toBe('original');
+    expect(await files.uploadMetadata('other', other.source.uri)).toMatchObject({
+      fileName: 'clip.mp3',
+    });
+  });
+
+  it('uses the lifecycle lock during publication and source reads, and recovers an interrupted removal', async () => {
+    const { root, context } = await setup();
+    const actions: string[] = [];
+    const files = new NodeFiles({
+      workRoot: root,
+      uploadLifecycle: {
+        async publish(ownerId, id, action) {
+          actions.push(`publish:${ownerId}:${id}`);
+          await action();
+        },
+        async read(ownerId, id, action) {
+          actions.push(`read:${ownerId}:${id}`);
+          return action();
+        },
+      },
+    });
+    const data = Buffer.from('content').toString('base64');
+    const { source } = await files.upload(context.ownerId, 'c.mp3', data);
+    const path = files.uploadPath(context.ownerId, source.uri);
+    const detached = join(root, 'uploads', context.ownerId, `.removing-${source.uri}`);
+    await rename(path, detached);
+    expect((await files.upload(context.ownerId, 'c.mp3', data)).source).toEqual(source);
+    await expect(readdir(detached)).rejects.toMatchObject({ code: 'ENOENT' });
+    const sources = new NodeSources({ files });
+    const artifact = await sources.materialize(await sources.resolve(source, context), context);
+    expect(await readFile(artifact.uri, 'utf8')).toBe('content');
+    expect(actions).toEqual(
+      ['publish', 'publish', 'read', 'read'].map(
+        (kind) => `${kind}:${context.ownerId}:${source.uri}`,
+      ),
+    );
   });
   it('stores uploads with opaque IDs, cleans names and isolates owners', async () => {
     const { files, context } = await setup();

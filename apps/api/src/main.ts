@@ -5,22 +5,24 @@ import { MediaSdk } from '@media-ingest/sdk';
 import {
   PostgresJobRepository,
   PostgresAuthStore,
-  NodeFiles,
   NodeMedia,
   NodeSources,
   NodeProviders,
 } from '@media-ingest/adapters';
 import { createApplication } from './application.js';
 import { loadConfig } from './config.js';
+import { createUploadStorage } from './upload-storage.js';
 
 const config = loadConfig();
 const sql = postgres(config.DATABASE_URL, { max: 10 });
 // Migrations are an explicit deployment step, never a side effect of a request or startup.
 await sql`SELECT id FROM media_v1.jobs LIMIT 0`;
+const [migration] = await sql`SELECT version FROM media_v1.migrations WHERE version = 2`;
+if (!migration) throw new Error('Apply migration 002 before starting the API');
 const credentials = config.GOOGLE_SERVICE_ACCOUNT_JSON
   ? (JSON.parse(config.GOOGLE_SERVICE_ACCOUNT_JSON) as Record<string, unknown>)
   : undefined;
-const files = new NodeFiles({ workRoot: config.MEDIA_WORK_ROOT });
+const { files, retention } = createUploadStorage(sql, config.MEDIA_WORK_ROOT);
 const media = new NodeMedia({ files });
 const sources = new NodeSources({
   files,
@@ -62,7 +64,7 @@ const provider = new NodeProviders({
   },
 });
 const sdk = new MediaSdk({
-  repository: new PostgresJobRepository(sql),
+  repository: new PostgresJobRepository(sql, undefined, retention),
   sources,
   media,
   provider,
@@ -99,6 +101,20 @@ const pruneTimer = setInterval(
   60 * 60 * 1000,
 );
 pruneTimer.unref();
+let cleanup: Promise<void> | undefined;
+function cleanCompletedUploads() {
+  if (cleanup) return;
+  cleanup = retention
+    .drain()
+    .then(() => {})
+    .catch(() => console.error('Completed upload cleanup failed; will retry'))
+    .finally(() => {
+      cleanup = undefined;
+    });
+}
+cleanCompletedUploads();
+const cleanupTimer = setInterval(cleanCompletedUploads, 5000);
+cleanupTimer.unref();
 const abort = new AbortController();
 const workers = Array.from({ length: config.MEDIA_WORKERS }, async () => {
   while (!abort.signal.aborted) {
@@ -123,10 +139,12 @@ async function stop() {
   stopping = true;
   abort.abort();
   clearInterval(pruneTimer);
+  clearInterval(cleanupTimer);
   const deadline = setTimeout(() => process.exit(1), 30000);
   deadline.unref();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await Promise.allSettled(workers);
+  await cleanup;
   await application.close();
   await sql.end();
   clearTimeout(deadline);

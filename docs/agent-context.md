@@ -51,7 +51,7 @@ The CLI binds saved credentials to the normalized API URL. Supply an explicit to
 
 Run `pnpm check` with ffmpeg and a disposable PostgreSQL database. Use `compose.test.yml` and `TEST_DATABASE_URL`; tests reset `media_v1` and must not target live data. The gate includes typecheck, oxlint/oxfmt, dependency/release boundaries, coverage, HTTP/CLI/MCP/PostgreSQL E2E and offline CLI installation. Build Docker after changing runtime tools or authentication storage. Paid provider calls are not part of deterministic tests.
 
-Preserve atomic owner-scoped idempotency, source fingerprints and lease fencing on every checkpoint/final write. External calls are at least once; a crash before a checkpoint can repeat provider usage. No silent destructive retention policy exists. New operations need dispatcher behavior and parity/security tests, not separate hand-maintained CLI/MCP schemas.
+Preserve atomic owner-scoped idempotency, source fingerprints and lease fencing on every checkpoint/final write. External calls are at least once. A crash before a checkpoint can repeat provider usage. Original server uploads follow the [completion-based cleanup policy](adr/0006-upload-retention.md). New operations need dispatcher behavior and parity/security tests.
 
 ## Evidence that must stay separate
 

@@ -1,6 +1,17 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { AdapterContext, Artifact } from '@media-ingest/sdk';
 import { MediaError } from '@media-ingest/sdk';
@@ -23,12 +34,33 @@ function safeId(value: string): string {
     throw new MediaError('invalid_input', 'Invalid storage identifier');
   return value;
 }
+
+export interface UploadLifecycle {
+  publish(ownerId: string, id: string, write: () => Promise<void>): Promise<void>;
+  read<T>(ownerId: string, id: string, read: () => Promise<T>): Promise<T>;
+}
+
+interface UploadMetadata {
+  fileName: string;
+  path: string;
+}
+
+function isMissing(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
+}
+
 export class NodeFiles {
   readonly workRoot: string;
   readonly maxUploadBytes: number;
-  constructor(options: { workRoot: string; maxUploadBytes?: number }) {
+  private readonly uploadLifecycle?: UploadLifecycle;
+  constructor(options: {
+    workRoot: string;
+    maxUploadBytes?: number;
+    uploadLifecycle?: UploadLifecycle;
+  }) {
     this.workRoot = resolve(options.workRoot);
     this.maxUploadBytes = options.maxUploadBytes ?? MAX_INLINE_MEDIA_BYTES;
+    this.uploadLifecycle = options.uploadLifecycle;
   }
   workspace(context: AdapterContext): string {
     if (!Number.isInteger(context.attempt) || context.attempt < 0)
@@ -75,6 +107,8 @@ export class NodeFiles {
     const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     const path = this.uploadPath(ownerId, id);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    if (!(await this.isOwnerDirectory(path)))
+      throw new MediaError('invalid_input', 'Invalid upload owner');
     const staged = await mkdtemp(join(dirname(path), '.upload-'));
     try {
       await writeFile(join(staged, 'media'), buffer, { mode: 0o600, flag: 'wx' });
@@ -82,38 +116,97 @@ export class NodeFiles {
         mode: 0o600,
         flag: 'wx',
       });
-      try {
-        await rename(staged, path);
-      } catch (error) {
-        if (
-          !(error instanceof Error) ||
-          !('code' in error) ||
-          !['EEXIST', 'ENOTEMPTY'].includes(String(error.code))
-        )
-          throw error;
-        // Another identical upload may have won the atomic directory rename.
-        // Validate its complete contents; never overwrite an unexpected target.
-        const existing = await this.uploadMetadata(ownerId, id);
-        const artifact = await this.artifact(existing.path, existing.fileName);
-        if (existing.fileName !== name || artifact.fingerprint !== fingerprint)
-          throw new Error('Existing upload content does not match its identity');
-      }
+      const publish = async () => {
+        if (this.uploadLifecycle) {
+          // Recover a removal interrupted after detaching the previous publication.
+          await rm(this.detachedPath(path), { recursive: true, force: true });
+        }
+        try {
+          await rename(staged, path);
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !('code' in error) ||
+            !['EEXIST', 'ENOTEMPTY'].includes(String(error.code))
+          )
+            throw error;
+          // Another identical upload may have won the atomic directory rename.
+          // Validate its complete contents; never overwrite an unexpected target.
+          const existing = await this.uploadMetadata(ownerId, id);
+          const artifact = await this.artifact(existing.path, existing.fileName);
+          if (existing.fileName !== name || artifact.fingerprint !== fingerprint)
+            throw new Error('Existing upload content does not match its identity');
+        }
+      };
+      if (this.uploadLifecycle) await this.uploadLifecycle.publish(ownerId, id, publish);
+      else await publish();
     } finally {
       await rm(staged, { recursive: true, force: true });
     }
     return { source: { kind: 'upload', uri: id }, size: buffer.length };
   }
-  async uploadMetadata(ownerId: string, id: string): Promise<{ fileName: string; path: string }> {
+  /** Raw lookup for a caller that holds the lifecycle lock. Use withUpload to pin a read or copy. */
+  async uploadMetadata(ownerId: string, id: string): Promise<UploadMetadata> {
     const directory = this.uploadPath(ownerId, id);
-    const metadata: unknown = JSON.parse(await readFile(join(directory, 'metadata.json'), 'utf8'));
-    if (
-      !metadata ||
-      typeof metadata !== 'object' ||
-      !('fileName' in metadata) ||
-      typeof metadata.fileName !== 'string'
-    )
-      throw new Error('Invalid upload metadata');
-    return { fileName: safeName(metadata.fileName), path: join(directory, 'media') };
+    const path = join(directory, 'media');
+    try {
+      if (!(await this.isOwnerDirectory(directory)))
+        throw new MediaError('not_found', 'Upload not found');
+      const metadata: unknown = JSON.parse(
+        await readFile(join(directory, 'metadata.json'), 'utf8'),
+      );
+      if (
+        !metadata ||
+        typeof metadata !== 'object' ||
+        !('fileName' in metadata) ||
+        typeof metadata.fileName !== 'string'
+      )
+        throw new Error('Invalid upload metadata');
+      const info = await lstat(path);
+      if (!info.isFile() || !info.size) throw new Error('Invalid upload media');
+      return { fileName: safeName(metadata.fileName), path };
+    } catch (error) {
+      if (isMissing(error)) throw new MediaError('not_found', 'Upload not found');
+      throw error;
+    }
+  }
+
+  withUpload<T>(
+    ownerId: string,
+    id: string,
+    use: (metadata: UploadMetadata) => T | Promise<T>,
+  ): Promise<T> {
+    const read = async () => use(await this.uploadMetadata(ownerId, id));
+    return this.uploadLifecycle ? this.uploadLifecycle.read(ownerId, id, read) : read();
+  }
+
+  private detachedPath(path: string): string {
+    return join(dirname(path), `.removing-${basename(path)}`);
+  }
+
+  private async isOwnerDirectory(path: string): Promise<boolean> {
+    // Refuse a symlink in the operator-owned volume that could redirect deletion outside this owner.
+    for (const parent of [dirname(dirname(path)), dirname(path)]) {
+      if (!(await lstat(parent)).isDirectory()) throw new Error('Invalid upload directory');
+    }
+    // realpath returns the stored spelling even on a case-insensitive volume.
+    const parent = dirname(path);
+    return basename(await realpath(parent)) === basename(parent);
+  }
+
+  /** The retention coordinator holds the owner/upload lock through this callback. */
+  async removeUpload(ownerId: string, id: string): Promise<void> {
+    const path = this.uploadPath(ownerId, id);
+    const detached = this.detachedPath(path);
+    try {
+      if (!(await this.isOwnerDirectory(path))) return;
+      await rm(detached, { recursive: true, force: true });
+      await rename(path, detached);
+    } catch (error) {
+      if (isMissing(error)) return;
+      throw error;
+    }
+    await rm(detached, { recursive: true, force: true });
   }
   async readArtifact(artifact: Artifact, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
     signal.throwIfAborted();

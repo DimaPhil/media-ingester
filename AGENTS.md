@@ -15,6 +15,6 @@ Start with the [agent map](docs/agent-context.md) for owning files, tests and ou
 - PostgreSQL migrations are explicit. Do not mutate a live database for tests. TEST_DATABASE_URL must point to disposable test storage; persistence and E2E suites reset tables and run sequentially.
 - Required gate: pnpm check with PostgreSQL and ffmpeg available. It includes lint, format, typecheck, boundaries, coverage, E2E and offline CLI package installation. Build the Docker image for deployment changes.
 - Keep all package/API versions and RELEASE_VERSION aligned. Tagged releases publish matching server and CLI assets; do not claim a local build is deployed.
-- Uploads and job results are retained until explicit operator cleanup. Do not add destructive retention policies silently.
+- Clean up server upload bytes after the final successful job using them. Preserve queued, running, and failed jobs' inputs for recovery. Keep results, standalone uploads and historical completed-only uploads. Never delete a caller's local file.
 - Prefer one writer per area; independent read-only reviews may run concurrently.
 - When changing an accepted architectural choice, add a superseding ADR and link it from the decision index. Update the relevant guide and verify the affected invariant through its normal entry point.

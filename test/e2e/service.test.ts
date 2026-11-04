@@ -13,7 +13,7 @@ import {
   PostgresAuthStore,
   PostgresJobRepository,
 } from '../../packages/adapters/src/postgres.js';
-import { NodeFiles } from '../../packages/adapters/src/files.js';
+import { createUploadStorage } from '../../apps/api/src/upload-storage.js';
 import { jobSchema, operationIds, type JobView } from '../../packages/contracts/src/index.js';
 import { requireDisposableDatabase, verifyDisposableDatabase } from '../support/database.js';
 import {
@@ -39,7 +39,7 @@ let baseUrl: string;
 let server: ReturnType<typeof serve>;
 let application: ReturnType<typeof createApplication>;
 let sdk: MediaSdk;
-let files: NodeFiles;
+let storage: ReturnType<typeof createUploadStorage>;
 let failSecondChunk = false;
 const processed: number[] = [];
 const sources: SourceAdapter = {
@@ -82,7 +82,7 @@ const provider: ProviderAdapter = {
 };
 function newSdk() {
   return new MediaSdk({
-    repository: new PostgresJobRepository(sql),
+    repository: new PostgresJobRepository(sql, undefined, storage.retention),
     sources,
     media,
     provider,
@@ -142,7 +142,7 @@ beforeAll(async () => {
   await verifyDisposableDatabase(sql, databaseUrl!);
   await readFile(cliPath); // Fail early if the build step was omitted.
   directory = await mkdtemp(join(tmpdir(), 'media-e2e-'));
-  files = new NodeFiles({ workRoot: join(directory, 'storage') });
+  storage = createUploadStorage(sql, join(directory, 'storage'));
   await applyMigrations(sql);
   await new Promise<void>((done) => {
     server = serve(
@@ -157,7 +157,7 @@ beforeAll(async () => {
           publicUrl: baseUrl,
           ownerToken: token,
           authStore: new PostgresAuthStore(sql),
-          files,
+          files: storage.files,
         });
         done();
       },
@@ -166,7 +166,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`TRUNCATE media_v1.jobs, media_v1.auth_entries`;
+  await sql`TRUNCATE media_v1.jobs, media_v1.auth_entries, media_v1.upload_retention`;
   processed.length = 0;
   failSecondChunk = false;
 });
@@ -191,7 +191,7 @@ describe('real HTTP, CLI and durable worker', () => {
     };
     expect(upload.source.kind).toBe('upload');
     expect(
-      await readFile((await files.uploadMetadata('owner', upload.source.uri)).path, 'utf8'),
+      await readFile((await storage.files.uploadMetadata('owner', upload.source.uri)).path, 'utf8'),
     ).toBe('fixture bytes');
     const queued = jobSchema.parse(
       await cliJson(['transcribe', fixture, '--idempotency-key', 'local-fixture']),
@@ -203,6 +203,9 @@ describe('real HTTP, CLI and durable worker', () => {
     );
     expect(repeated.id).toBe(queued.id);
     expect(await sdk.runNext()).toBe(true);
+    expect(await storage.retention.drain()).toBe(1);
+    await expect(storage.files.uploadMetadata('owner', upload.source.uri)).rejects.toThrow();
+    expect(await readFile(fixture, 'utf8')).toBe('fixture bytes');
     const result = jobSchema.parse(await cliJson(['get', queued.id]));
     expect(result.status).toBe('completed');
     expect(result.result?.text).toBe('chunk 0 chunk 1');

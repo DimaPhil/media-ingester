@@ -64,7 +64,7 @@ Single owner. An owner token authenticates CLI/API. OAuth consent requires that 
 
 The `info` operation is authenticated but has no media-scope requirement, so a write-only client can check contract compatibility without gaining read access to jobs. All other operations enforce their catalog scopes.
 
-Never accept a server path through the wire contract. Public HTTP sources block private-address resolution and redirects; ffmpeg disables network protocols and playlist demuxers. Extra yt-dlp hosts and the Telegram proxy are operator-trusted configuration. Upload API uses JSON base64 up to 32 MiB; source materialization defaults to 1 GiB. No automatic upload/result deletion is implemented: operators manage retention and backups deliberately.
+Never accept a server path through the wire contract. Public HTTP sources block private-address resolution and redirects. ffmpeg disables network protocols and playlist demuxers. Extra yt-dlp hosts and the Telegram proxy are operator-trusted configuration. Upload API uses JSON base64 up to 32 MiB. Source materialization defaults to 1 GiB. The service releases uploaded inputs after successful processing under the [upload retention policy](adr/0006-upload-retention.md).
 
 ## Evolution
 

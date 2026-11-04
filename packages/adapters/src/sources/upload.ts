@@ -7,8 +7,11 @@ export class UploadSource extends DownloadSource {
   readonly kind = 'upload';
 
   protected async resolveSource(source: Source, context: AdapterContext) {
-    const metadata = await this.options.files.uploadMetadata(context.ownerId, source.uri);
-    return { source, fileName: metadata.fileName, metadata: {} };
+    return this.options.files.withUpload(context.ownerId, source.uri, ({ fileName }) => ({
+      source,
+      fileName,
+      metadata: {},
+    }));
   }
 
   protected async download(
@@ -16,7 +19,8 @@ export class UploadSource extends DownloadSource {
     context: AdapterContext,
     target: DownloadTarget,
   ) {
-    const metadata = await this.options.files.uploadMetadata(context.ownerId, source.uri);
-    return copyToTarget(metadata.path, target);
+    return this.options.files.withUpload(context.ownerId, source.uri, ({ path }) =>
+      copyToTarget(path, target),
+    );
   }
 }
