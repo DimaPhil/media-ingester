@@ -127,14 +127,22 @@ describe('Codex transcript normalization', () => {
     expect(result.result().text).toBe('Hello world');
     expect(result.result().segments.map((s) => s.startMs)).toEqual([0, 300]);
   });
-  it('rejects empty, conflicting, malformed and out-of-bounds transcripts', () => {
+  it('rejects empty, conflicting and malformed transcripts', () => {
     const result = new CodexTranscript(1000);
     expect(() => result.result()).toThrow('empty');
     result.add(event('a', 'Hi'));
     expect(() => result.add(event('a', 'Bye'))).toThrow('conflicting');
-    expect(() => result.add(event('b', 'x', 100, 1001))).toThrow('timestamps');
     expect(() => result.add(event('c', 'x', -1, 100))).toThrow('timestamps');
     expect(() => result.add({ type: 'input_transcript.added' })).toThrow('timestamps');
+  });
+  it('preserves words beyond the clip while bounding intersecting timestamps', () => {
+    const result = new CodexTranscript(2635);
+    result.add(event('a', 'The bicycle', 0, 2800));
+    result.add(event('b', ' is outside.', 2800, 3000));
+    expect(result.result()).toMatchObject({
+      text: 'The bicycle is outside.',
+      segments: [{ startMs: 0, endMs: 2635, text: 'The bicycle' }],
+    });
   });
 });
 describe('Codex realtime lifecycle', () => {
