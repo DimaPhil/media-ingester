@@ -1,27 +1,20 @@
-import { copyFile, stat } from 'node:fs/promises';
-import { type NodeFiles, safeName } from '../files.js';
-import type { SourceDriver } from './download.js';
+import { stat } from 'node:fs/promises';
+import type { ResolvedSource, Source } from '@media-ingest/contracts';
+import type { AdapterContext } from '@media-ingest/sdk';
+import { safeName } from '../files.js';
+import { DownloadSource, type DownloadTarget } from './download.js';
+import { copyToTarget } from './copy-to-target.js';
 
-export function localSource(files: NodeFiles): SourceDriver {
-  return {
-    async resolve(source, context) {
-      if (source.kind === 'upload') {
-        const metadata = await files.uploadMetadata(context.ownerId, source.uri);
-        return { source, fileName: metadata.fileName, metadata: {} };
-      }
-      const info = await stat(source.uri);
-      if (!info.isFile()) throw new Error('Local source must be a regular file');
-      return { source, fileName: safeName(source.uri), metadata: { size: info.size } };
-    },
-    async download({ source }, context, { path, maxBytes }) {
-      const origin =
-        source.kind === 'upload'
-          ? (await files.uploadMetadata(context.ownerId, source.uri)).path
-          : source.uri;
-      if ((await stat(origin)).size > maxBytes)
-        throw new Error('Media exceeds configured download limit');
-      await copyFile(origin, path);
-      return path;
-    },
-  };
+export class LocalFileSource extends DownloadSource {
+  readonly kind = 'local_file';
+
+  protected async resolveSource(source: Source) {
+    const info = await stat(source.uri);
+    if (!info.isFile()) throw new Error('Local source must be a regular file');
+    return { source, fileName: safeName(source.uri), metadata: { size: info.size } };
+  }
+
+  protected download({ source }: ResolvedSource, _context: AdapterContext, target: DownloadTarget) {
+    return copyToTarget(source.uri, target);
+  }
 }

@@ -56,7 +56,7 @@ Run the native unmodified CLI with argument arrays, bounded input/output, a dead
 
 The runtime serializes access to each dedicated credential home across processes with `.media-subscription.lock`. A crashed owner is not silently replaced: stop/verify the previous process before removing a stale lock. A credential home must be an absolute writable canonical directory, not a symlink or the ordinary host agent home. Native CLI failures distinguish required login, usage limits, deadline and cancellation without reflecting private stdout/stderr into job errors.
 
-Owning sources: `packages/adapters/src/codex-audio.ts`, `subscription-understanding.ts`, `subscription-runtime.ts`, and the dispatch in `providers.ts`. SDK orchestration remains vendor-independent through `ProviderAdapter.inputFormat/process/translate`.
+The [Codex provider](../packages/adapters/src/providers/codex.ts) and [Claude Code provider](../packages/adapters/src/providers/claude-code.ts) supply their respective [CLI reasoners](../packages/adapters/src/reasoning/). They share frame and transcript preparation in `subscription-understanding.ts` and process isolation in `subscription-runtime.ts`. Codex uses `codex-audio.ts` for native ASR. The SDK invokes each through `ProviderAdapter`.
 
 ## Earlier server observation — not deployment evidence
 

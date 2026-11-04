@@ -1,8 +1,16 @@
 import { readFile, stat } from 'node:fs/promises';
 import type { MediaRequest } from '@media-ingest/contracts';
-import type { Artifact, ChunkOutput } from '@media-ingest/sdk';
+import type { AdapterContext, Artifact, ChunkOutput } from '@media-ingest/sdk';
 import { z } from 'zod';
 import { checked, key, parseTranslation } from './shared.js';
+import { ApiProvider } from './api-provider.js';
+
+interface OpenAiOptions {
+  apiKey?: string;
+  model?: string;
+  translationModel?: string;
+  timeoutMs?: number;
+}
 const openAiSchema = z.object({
   text: z.string(),
   language: z.string().optional(),
@@ -31,41 +39,67 @@ export function parseOpenAi(value: unknown): ChunkOutput {
     })),
   };
 }
-export async function transcribeOpenAi(
-  artifact: Artifact,
-  request: MediaRequest,
-  model: string,
-  apiKey: string | undefined,
-  signal: AbortSignal,
-): Promise<ChunkOutput> {
-  if ((await stat(artifact.uri)).size > 24 * 1024 * 1024)
-    throw new Error('OpenAI chunk exceeds 24 MiB');
-  const form = new FormData();
-  form.set(
-    'file',
-    new Blob([await readFile(artifact.uri)], { type: artifact.mimeType ?? 'audio/mpeg' }),
-    artifact.fileName,
-  );
-  form.set('model', model);
-  form.set(
-    'response_format',
-    model.includes('diarize')
-      ? 'diarized_json'
-      : model.startsWith('whisper-')
-        ? 'verbose_json'
-        : 'json',
-  );
-  if (model.includes('diarize')) form.set('chunking_strategy', 'auto');
-  if (request.inputLanguage) form.set('language', request.inputLanguage);
-  const response = await checked('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key(apiKey, 'OPENAI_API_KEY')}` },
-    body: form,
-    signal,
-  });
-  return parseOpenAi(await response.json());
+export class OpenAiProvider extends ApiProvider {
+  static readonly capabilities = {
+    transcription: true,
+    understanding: false,
+    nativeVideo: false,
+  } as const;
+
+  static translator({ apiKey, translationModel = 'gpt-4.1-mini' }: OpenAiOptions) {
+    return (prompt: string, signal: AbortSignal) =>
+      translateOpenAi(prompt, translationModel, apiKey, signal);
+  }
+
+  constructor(
+    private readonly options: OpenAiOptions = {},
+    translator = OpenAiProvider.translator(options),
+  ) {
+    super('openai', options.timeoutMs, translator);
+  }
+
+  protected defaultModel(): string {
+    return this.options.model ?? 'gpt-4o-transcribe';
+  }
+
+  async process(
+    artifact: Artifact,
+    request: MediaRequest,
+    context: AdapterContext,
+  ): Promise<ChunkOutput> {
+    if (request.kind !== 'transcription') throw new Error('Understanding requires Gemini');
+    const model = this.resolveModel(request);
+    const signal = this.signal(context);
+    const apiKey = this.options.apiKey;
+    if ((await stat(artifact.uri)).size > 24 * 1024 * 1024)
+      throw new Error('OpenAI chunk exceeds 24 MiB');
+    const form = new FormData();
+    form.set(
+      'file',
+      new Blob([await readFile(artifact.uri)], { type: artifact.mimeType ?? 'audio/mpeg' }),
+      artifact.fileName,
+    );
+    form.set('model', model);
+    form.set(
+      'response_format',
+      model.includes('diarize')
+        ? 'diarized_json'
+        : model.startsWith('whisper-')
+          ? 'verbose_json'
+          : 'json',
+    );
+    if (model.includes('diarize')) form.set('chunking_strategy', 'auto');
+    if (request.inputLanguage) form.set('language', request.inputLanguage);
+    const response = await checked('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key(apiKey, 'OPENAI_API_KEY')}` },
+      body: form,
+      signal,
+    });
+    return parseOpenAi(await response.json());
+  }
 }
-export async function translateOpenAi(
+async function translateOpenAi(
   prompt: string,
   model: string,
   apiKey: string | undefined,

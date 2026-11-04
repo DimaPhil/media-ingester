@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import type { Sql, TransactionSql } from 'postgres';
 import type { JobView, MediaResult } from '@media-ingest/contracts';
@@ -13,23 +12,8 @@ import type {
   ListJobs,
 } from '@media-ingest/sdk';
 
-/** Migrations are explicit: API startup must not silently change a production schema. */
-export async function applyMigrations(sql: Sql): Promise<void> {
-  const migration = await readFile(
-    new URL('../migrations/001_initial.sql', import.meta.url),
-    'utf8',
-  );
-  await sql.begin(async (transaction) => {
-    await transaction`SELECT pg_advisory_xact_lock(716385901)`;
-    await transaction`CREATE SCHEMA IF NOT EXISTS media_v1`;
-    await transaction`CREATE TABLE IF NOT EXISTS media_v1.migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-    const existing = await transaction`SELECT version FROM media_v1.migrations WHERE version = 1`;
-    if (existing.length === 0) {
-      await transaction.unsafe(migration);
-      await transaction`INSERT INTO media_v1.migrations (version) VALUES (1)`;
-    }
-  });
-}
+export { applyMigrations } from './migrations.js';
+export { PostgresAuthStore } from './postgres-auth-store.js';
 
 type Db = Sql | TransactionSql;
 type JobRow = { data: JobRecord };
@@ -241,44 +225,5 @@ export class PostgresJobRepository implements JobRepository {
       await writeJob(transaction, job);
       return job;
     });
-  }
-}
-
-/** Values contain only hashed bearer/code keys. `take` consumes codes atomically across instances. */
-export class PostgresAuthStore {
-  constructor(
-    private readonly sql: Sql,
-    private readonly now: () => number = Date.now,
-  ) {}
-
-  async put(key: string, value: unknown, expiresAt: number): Promise<void> {
-    await this.sql`INSERT INTO media_v1.auth_entries (key,value,expires_at)
-      VALUES (${key},${this.sql.json(JSON.parse(JSON.stringify(value)))},${expiresAt})
-      ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, expires_at=EXCLUDED.expires_at`;
-  }
-
-  async get<T = unknown>(key: string): Promise<T | null> {
-    const rows = await this.sql<
-      { value: T }[]
-    >`SELECT value FROM media_v1.auth_entries WHERE key=${key} AND expires_at > ${this.now()}`;
-    return rows[0]?.value ?? null;
-  }
-
-  async take<T = unknown>(key: string): Promise<T | null> {
-    const rows = await this.sql<
-      { value: T; expires_at: string }[]
-    >`DELETE FROM media_v1.auth_entries WHERE key=${key} RETURNING value, expires_at`;
-    const row = rows[0];
-    return row && Number(row.expires_at) > this.now() ? row.value : null;
-  }
-
-  async delete(key: string): Promise<void> {
-    await this.sql`DELETE FROM media_v1.auth_entries WHERE key=${key}`;
-  }
-
-  async prune(): Promise<number> {
-    const rows = await this
-      .sql`DELETE FROM media_v1.auth_entries WHERE expires_at <= ${this.now()}`;
-    return rows.count;
   }
 }

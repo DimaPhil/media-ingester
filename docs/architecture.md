@@ -26,9 +26,29 @@ Contracts own public validation and metadata. SDK owns orchestration and ports, 
 
 ### Changing a source
 
-Start in [the source implementations](../packages/adapters/src/sources/). Each integration owns both phases of ingestion. `resolve` identifies one media item and its metadata. `materialize` retrieves its bytes for a specific job attempt. Keeping those phases together lets the Google Drive and Telegram integrations each own their identifier, credentials and download protocol.
+Every source kind has a concrete class in [the source directory](../packages/adapters/src/sources/). [`DownloadSource`](../packages/adapters/src/sources/download.ts) implements the SDK's `SourceAdapter` interface. Its public `resolve` and `materialize` methods enforce the source kind and deadline. Materialization also creates the attempt workspace, checks the byte limit, and fingerprints the result. Each subclass supplies the source-specific lookup and download steps.
 
-YouTube, Instagram and X share the [yt-dlp implementation](../packages/adapters/src/sources/yt-dlp.ts). Their accepted URLs and extractors are separate entries in [the site registry](../packages/adapters/src/source-registry.ts). Edit the policy there when a site's URL format changes. To replace the downloader for a named source in an embedding application, pass a `SourceAdapter` in `new NodeSources({ files, overrides: { instagram: myAdapter } })`. An explicitly submitted `yt_dlp` source uses its own registry entry point.
+For a Telegram proxy change, start in [`TelegramSource`](../packages/adapters/src/sources/telegram.ts). For an Instagram URL change, start in [`InstagramSource`](../packages/adapters/src/sources/instagram.ts). Instagram, YouTube and X each own their site policy and inherit the yt-dlp command and credential handling from `YtDlpSourceBase`. Generic `yt_dlp` requests use a separate class and the registered site policies. To replace Instagram for an embedding application, supply `new NodeSources({ files, overrides: { instagram: myAdapter } })`.
+
+### Changing a model provider
+
+The SDK calls a `ProviderAdapter` to resolve a model, choose the chunk duration and input format, process one chunk, and translate its result when requested. [`NodeProviders`](../packages/adapters/src/providers.ts) selects the implementation by the request's provider ID. The concrete classes in [the provider directory](../packages/adapters/src/providers/) own their capabilities, model defaults and vendor behavior.
+
+```mermaid
+classDiagram
+  class ProviderAdapter {
+    <<interface>>
+  }
+  ProviderAdapter <|.. ApiProvider
+  ProviderAdapter <|.. SubscriptionProvider
+  ApiProvider <|-- OpenAiProvider
+  ApiProvider <|-- GeminiProvider
+  ApiProvider <|-- GoogleSpeechProvider
+  SubscriptionProvider <|-- CodexProvider
+  SubscriptionProvider <|-- ClaudeCodeProvider
+```
+
+For a Gemini upload or polling change, start in [the Gemini class](../packages/adapters/src/providers/gemini.ts). The API providers share deadline handling and a translation service selected at composition time. The subscription providers share frame and transcript preparation. Each supplies its own native CLI reasoning implementation and uses its subscription for translation. Codex also owns the realtime transcription path.
 
 ## Persistence and recovery
 

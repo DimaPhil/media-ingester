@@ -1,6 +1,15 @@
 import { z } from 'zod';
 import { rangeSchema, segmentSchema } from '@media-ingest/contracts';
-import type { ChunkOutput } from '@media-ingest/sdk';
+import { MediaError, type ChunkOutput } from '@media-ingest/sdk';
+import type { MediaRequest } from '@media-ingest/contracts';
+
+export function assertSelectedProvider(request: MediaRequest, provider: MediaRequest['provider']) {
+  if (request.provider !== provider)
+    throw new MediaError(
+      'invalid_request',
+      `The ${provider} adapter cannot handle a ${request.provider} request`,
+    );
+}
 const chunkSchema = z.object({
   text: z.string(),
   segments: z.array(segmentSchema).default([]),

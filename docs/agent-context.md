@@ -1,6 +1,6 @@
 # Context for future sessions
 
-This is the short entry point for work on the rewritten service. Source and current test output take precedence over this document. Read [architecture](architecture.md) for invariants and [media providers](media-providers.md) for credential setup and integration limits.
+Use [architecture](architecture.md) for invariants and class hierarchies, [accepted ADRs](adr/README.md) for the reasoning behind them, [media providers](media-providers.md) for integration limits, and [Ubuntu deployment](ubuntu-deployment.md) for operator configuration. The [original rewrite plan](reimplementation-plan.md) records the initial scope. Use current code and tests for implemented behavior.
 
 ## Decisions to preserve
 
@@ -29,20 +29,23 @@ flowchart LR
 
 ## Where changes belong
 
-| Area                                              | Owning source                                                                    |
-| ------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Wire DTOs, provider IDs, operation catalog        | `packages/contracts/src/index.ts`                                                |
-| Durable jobs, interfaces, aggregation             | `packages/sdk/src`                                                               |
-| Source registration and implementations           | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`             |
-| Media inspection, model routing and API providers | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                   |
-| Subscription audio                                | `packages/adapters/src/codex-audio.ts`                                           |
-| Subscription understanding and process isolation  | `packages/adapters/src/subscription-understanding.ts`, `subscription-runtime.ts` |
-| Server config and composition                     | `apps/api/src/config.ts`, `main.ts`                                              |
-| REST/MCP, shared dispatcher and authentication    | `apps/api/src/application.ts`, `operations.ts`, `auth/`                          |
-| HTTP client and distributable CLI                 | `packages/client`, `packages/cli`                                                |
-| Release and dependency enforcement                | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`         |
+| Area                                              | Owning source                                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Wire DTOs, provider IDs, operation catalog        | `packages/contracts/src/media.ts`, `operations.ts`, `documents.ts`                                        |
+| Durable jobs, interfaces, aggregation             | `packages/sdk/src/ports.ts`, `sdk.ts`, `worker.ts`, `chunks.ts`                                           |
+| Source registration and implementations           | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`                                      |
+| Media inspection, model routing and API providers | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                                            |
+| Subscription audio                                | `packages/adapters/src/codex-audio.ts`, `codex-realtime.ts`, `codex-app-server.ts`                        |
+| Subscription understanding and process isolation  | `packages/adapters/src/subscription-understanding.ts`, `subscription-media.ts`, `subscription-runtime.ts` |
+| Server config and composition                     | `apps/api/src/config.ts`, `main.ts`                                                                       |
+| HTTP middleware, REST/MCP and shared dispatch     | `apps/api/src/application.ts`, `rest.ts`, `mcp.ts`, `operations.ts`                                       |
+| Owner and OAuth authentication                    | `apps/api/src/auth/`                                                                                      |
+| HTTP client and distributable CLI                 | `packages/client`, `packages/cli`                                                                         |
+| Release and dependency enforcement                | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`                                  |
 
 ## Checks and operating constraints
+
+Trace a remote request from the [operation catalog](../packages/contracts/src/operations.ts) through the [dispatcher](../apps/api/src/operations.ts), [SDK API](../packages/sdk/src/sdk.ts), [worker](../packages/sdk/src/worker.ts) and [ports](../packages/sdk/src/ports.ts). The [server composition root](../apps/api/src/main.ts) binds concrete adapters. The [application tests](../apps/api/test/application.test.ts) exercise authorization and transport parity. The [adapter tests](../packages/adapters/test/) cover provider routing, network policy and PostgreSQL. The [end-to-end suite](../test/e2e/service.test.ts) exercises the running service, CLI, MCP and worker together.
 
 The CLI binds saved credentials to the normalized API URL. Supply an explicit token when overriding it with a different endpoint. Both destructive PostgreSQL suites verify the connected database name before migrations. PostgreSQL workers use database time after acquiring the row lock and check expiry again on write.
 

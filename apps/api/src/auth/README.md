@@ -1,5 +1,7 @@
 # Private owner authentication
 
+The [auth entry point](index.ts) orchestrates discovery, rate limiting and request routing. [Clients](clients.ts) owns registration and validates client metadata from both registration paths. [Consent](consent.ts) binds a grant to the browser and owner decision. [Tokens](tokens.ts) owns PKCE exchange, bearer authentication and revocation. The [network boundary](metadata.ts) handles SSRF-safe client metadata retrieval.
+
 `createAuth` is a Fetch-compatible authorization server and resource authentication boundary. Mount `handle(request)` before API/MCP routes; a null response means the route belongs to the application. Call `authenticate(request, publicUrl)` for REST and `authenticate(request, publicUrl + '/mcp')` for MCP, then enforce the operation catalog scope. Owner API tokens can access both resources. OAuth tokens are bound to one exact resource and their approved scopes.
 
 Set a random owner token of at least 32 characters and an HTTPS public origin. HTTP loopback is accepted for development only. Protect incoming Host/Origin at the server composition layer. Credentials never appear in redirects or stored plaintext; access tokens and codes use SHA-256 storage keys. The owner token is entered only into the server's consent page. Approval requires a same-origin POST plus a one-use browser-cookie-bound consent record. Invalid redirects are never followed.

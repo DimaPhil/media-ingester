@@ -1,6 +1,8 @@
 import { writeFile } from 'node:fs/promises';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { MediaRequest } from '@media-ingest/contracts';
+import { ClaudeReasoner } from '../src/reasoning/claude.js';
+import { CodexReasoner } from '../src/reasoning/codex.js';
 const mocks = vi.hoisted(() => ({
   command: vi.fn(),
   transcribe: vi.fn(),
@@ -36,6 +38,8 @@ const request: MediaRequest = {
   source: { kind: 'local_file', uri: '/clip.mp4' },
 };
 const options = { codexHome: '/credentials/codex', claudeHome: '/credentials/claude' };
+const claude = new ClaudeReasoner();
+const codex = new CodexReasoner();
 const output = { text: 'Evidence summary', segments: [], timeRanges: [], detectedLanguage: null };
 beforeEach(() => {
   vi.resetAllMocks();
@@ -65,6 +69,13 @@ beforeEach(() => {
   });
 });
 describe('subscription understanding', () => {
+  it('rejects a mismatched native reasoner before invoking its CLI', async () => {
+    await expect(
+      translateSubscription('Text', { ...request, targetLanguage: 'fr' }, context, options, claude),
+    ).rejects.toMatchObject({ code: 'subscription_configuration' });
+    expect(mocks.auth).not.toHaveBeenCalled();
+    expect(mocks.process).not.toHaveBeenCalled();
+  });
   it.each([
     { loggedIn: true, authMethod: 'console', apiProvider: 'firstParty' },
     { loggedIn: true, authMethod: 'api_key', apiProvider: 'firstParty' },
@@ -78,6 +89,7 @@ describe('subscription understanding', () => {
         { ...request, provider: 'claude-code', targetLanguage: 'fr' },
         context,
         options,
+        claude,
       ),
     ).rejects.toMatchObject({ code: 'subscription_auth_required' });
     expect(mocks.process).not.toHaveBeenCalled();
@@ -88,6 +100,7 @@ describe('subscription understanding', () => {
       { ...request, provider: 'claude-code' },
       context,
       options,
+      claude,
     );
     expect(mocks.transcribe.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.process.mock.invocationCallOrder[0]!,
@@ -110,7 +123,13 @@ describe('subscription understanding', () => {
       await writeFile(args.at(-1), 'media');
       return '';
     });
-    await understandSubscription({ ...artifact, durationMs: 60_000 }, request, context, options);
+    await understandSubscription(
+      { ...artifact, durationMs: 60_000 },
+      request,
+      context,
+      options,
+      codex,
+    );
     const extraction = mocks.command.mock.calls.find(([, args]) => args.includes('pcm_s16le'))![1];
     expect(extraction[extraction.indexOf('-t') + 1]).toBe('60');
     expect(mocks.transcribe.mock.calls[0]![0].durationMs).toBe(60_000);
@@ -127,11 +146,17 @@ describe('subscription understanding', () => {
       stderr: '',
     });
     await expect(
-      understandSubscription(artifact, { ...request, provider: 'claude-code' }, context, options),
+      understandSubscription(
+        artifact,
+        { ...request, provider: 'claude-code' },
+        context,
+        options,
+        claude,
+      ),
     ).rejects.toThrow('invalid clip timestamps');
   });
   it('finishes ASR before starting reasoning, with all transcript and timestamped frames initially attached', async () => {
-    const result = await understandSubscription(artifact, request, context, options);
+    const result = await understandSubscription(artifact, request, context, options, codex);
     expect(mocks.transcribe.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.process.mock.invocationCallOrder[0]!,
     );
@@ -150,7 +175,7 @@ describe('subscription understanding', () => {
       timeRanges: [],
       detectedLanguage: null,
     });
-    const result = await understandSubscription(artifact, request, context, options);
+    const result = await understandSubscription(artifact, request, context, options, codex);
     expect(result.provenance).toEqual({ frameIntervalMs: 5000 });
     expect(mocks.process.mock.calls[0]![2].input).toContain(
       'Complete audio transcript: {"text":"","segments":[]}',
@@ -168,6 +193,7 @@ describe('subscription understanding', () => {
       { ...request, provider: 'claude-code' },
       context,
       options,
+      claude,
     );
     expect(mocks.transcribe).not.toHaveBeenCalled();
     const [, args, invocation] = mocks.process.mock.calls[0]!;
@@ -180,14 +206,20 @@ describe('subscription understanding', () => {
     mocks.command.mockResolvedValue(
       JSON.stringify({ format: { duration: '10' }, streams: [{ codec_type: 'audio' }] }),
     );
-    await understandSubscription(artifact, request, context, options);
+    await understandSubscription(artifact, request, context, options, codex);
     expect(mocks.command).toHaveBeenCalledTimes(2);
     expect(mocks.process.mock.calls[0]![1]).not.toContain('--image');
   });
   it('rejects unsuccessful Claude output', async () => {
     mocks.process.mockResolvedValue({ stdout: '{"type":"result","is_error":true}', stderr: '' });
     await expect(
-      understandSubscription(artifact, { ...request, provider: 'claude-code' }, context, options),
+      understandSubscription(
+        artifact,
+        { ...request, provider: 'claude-code' },
+        context,
+        options,
+        claude,
+      ),
     ).rejects.toThrow('successful structured output');
   });
   it('translates with the same selected subscription model', async () => {
@@ -201,6 +233,7 @@ describe('subscription understanding', () => {
         { ...request, provider: 'claude-code', targetLanguage: 'fr' },
         context,
         options,
+        claude,
       ),
     ).toBe('Translated');
     expect(mocks.process.mock.calls[0]![1]).toContain('chosen-model');

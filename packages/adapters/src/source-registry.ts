@@ -1,5 +1,8 @@
 import type { Source } from '@media-ingest/contracts';
 import { MediaError } from '@media-ingest/sdk';
+import { YouTubeSource } from './sources/youtube.js';
+import { InstagramSource } from './sources/instagram.js';
+import { XSource } from './sources/x.js';
 
 /** Operator configuration, never accepted from an API request. */
 export interface YtDlpSiteDefinition {
@@ -8,36 +11,16 @@ export interface YtDlpSiteDefinition {
   extractors: readonly string[];
   /** Optional anchored URL pathname expression for custom single-item providers. */
   pathPattern?: string;
+  validateUrl?(url: URL): void;
 }
 export interface YtDlpSiteAuth {
   cookiesPath?: string;
   cookiesFromBrowser?: string;
 }
 export const builtinYtDlpSites: readonly YtDlpSiteDefinition[] = [
-  {
-    id: 'youtube',
-    hosts: ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'],
-    extractors: ['youtube'],
-  },
-  {
-    id: 'instagram',
-    hosts: ['instagram.com', 'www.instagram.com'],
-    extractors: ['Instagram'],
-    pathPattern: '^/(?:p|reel|reels|tv)/[A-Za-z0-9_-]+/?$',
-  },
-  {
-    id: 'x',
-    hosts: [
-      'x.com',
-      'www.x.com',
-      'mobile.x.com',
-      'twitter.com',
-      'www.twitter.com',
-      'mobile.twitter.com',
-    ],
-    extractors: ['twitter'],
-    pathPattern: '^/(?:[A-Za-z0-9_]+/status|i/status)/[0-9]+(?:/video/[0-9]+)?/?$',
-  },
+  YouTubeSource.site,
+  InstagramSource.site,
+  XSource.site,
 ];
 const reservedIds = new Set(['http', 'upload', 'local_file', 'google_drive', 'telegram', 'yt_dlp']);
 export class YtDlpSourceRegistry {
@@ -112,19 +95,8 @@ export class YtDlpSourceRegistry {
         'invalid_input',
         `URL does not belong to the ${source.kind} source provider`,
       );
-    if (site.id === 'youtube') {
-      const id =
-        url.hostname === 'youtu.be'
-          ? url.pathname.slice(1).replace(/\/$/, '')
-          : url.pathname === '/watch'
-            ? url.searchParams.get('v')
-            : url.pathname.match(/^\/(?:shorts|live|embed)\/([A-Za-z0-9_-]+)\/?$/)?.[1];
-      if (url.searchParams.has('list') || !id || !/^[A-Za-z0-9_-]+$/.test(id))
-        throw new MediaError(
-          'invalid_input',
-          'Expected one YouTube video, not a playlist, channel or search URL',
-        );
-    } else if (site.pathPattern && !new RegExp(site.pathPattern).test(url.pathname)) {
+    site.validateUrl?.(url);
+    if (site.pathPattern && !new RegExp(site.pathPattern).test(url.pathname)) {
       throw new MediaError('invalid_input', `Expected a single ${site.id} post URL`);
     }
     url.hash = '';

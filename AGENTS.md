@@ -1,10 +1,11 @@
 # Working on Media Ingest
 
-Read README.md for commands, docs/architecture.md for invariants, and docs/agent-context.md for provider decisions and unfinished live validation. Keep local visual review artifacts outside Git.
+Start with the [agent map](docs/agent-context.md) for owning files, tests and outstanding live checks. Use the [README](README.md) for commands, [architecture](docs/architecture.md) for interfaces and invariants, [decision records](docs/adr/README.md) for rationale, and the [Ubuntu runbook](docs/ubuntu-deployment.md) for configuration. Keep local visual review artifacts outside Git.
 
 - Use pnpm 10.6.1, TypeScript ESM/NodeNext, oxlint and oxfmt. Keep Markdown paragraphs on one physical line.
 - Contracts are the single catalog for REST, CLI and MCP. Express constraints structurally so JSON Schema matches runtime validation. Add new behavior in the API dispatcher and parity tests.
 - SDK owns lifecycle and interfaces. Never import SQL, HTTP, filesystem, child processes or vendor SDKs there. Put concrete implementations in adapters.
+- Give each built-in source kind and model provider its own concrete class and file. Implement the SDK port directly or through a shared base. Keep site or model policy with the class, shared transport behavior in the base or a collaborator, and registries limited to selection and wiring.
 - CLI/client must never import SDK, adapters or API internals. CLI media actions call HTTP. Local-file processing requires upload first.
 - Every persistence mutation must preserve owner isolation, atomic idempotency and lease fencing. Save each chunk before aggregation; compare source fingerprints before reusing checkpoints. Provider calls are at least once.
 - Authentication is mandatory. OAuth registration is not consent. Preserve PKCE, exact redirect/resource binding, scopes, single-use codes and SSRF-safe client metadata retrieval.
@@ -16,3 +17,4 @@ Read README.md for commands, docs/architecture.md for invariants, and docs/agent
 - Keep all package/API versions and RELEASE_VERSION aligned. Tagged releases publish matching server and CLI assets; do not claim a local build is deployed.
 - Uploads and job results are retained until explicit operator cleanup. Do not add destructive retention policies silently.
 - Prefer one writer per area; independent read-only reviews may run concurrently.
+- When changing an accepted architectural choice, add a superseding ADR and link it from the decision index. Update the relevant guide and verify the affected invariant through its normal entry point.

@@ -14,7 +14,10 @@ vi.mock('../src/subscription-runtime.js', () => ({
   subscriptionEnvironment: () => ({ PATH: '/bin' }),
   runSubscriptionProcess: mocks.run,
 }));
-vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
+vi.mock(import('node:child_process'), async (original) => ({
+  ...(await original()),
+  spawn: mocks.spawn,
+}));
 vi.mock('node:dgram', () => ({
   createSocket: () => {
     const socket = new EventEmitter() as any;

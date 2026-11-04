@@ -33,6 +33,8 @@ function sourceContext(ownerId: string): AdapterContext {
   return { ownerId, jobId: randomUUID(), attempt: 0, signal: AbortSignal.timeout(120000) };
 }
 
+export type OperationDispatcher = ReturnType<typeof createDispatcher>;
+
 export function createDispatcher(options: OperationDependencies) {
   return async (
     ownerId: string,

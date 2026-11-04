@@ -1,10 +1,10 @@
 import { mkdir, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import type { AdapterContext, SourceAdapter } from '@media-ingest/sdk';
+import { MediaError, type AdapterContext, type SourceAdapter } from '@media-ingest/sdk';
 import type { ResolvedSource, Source } from '@media-ingest/contracts';
 import type { NodeFiles } from '../files.js';
 
-interface DownloadOptions {
+export interface DownloadOptions {
   files: NodeFiles;
   timeoutMs?: number;
   maxDownloadBytes?: number;
@@ -16,44 +16,54 @@ export interface DownloadTarget {
   maxBytes: number;
 }
 
-export interface SourceDriver {
-  resolve(source: Source, context: AdapterContext): Promise<ResolvedSource>;
-  download(
+/** Template for a bounded, attempt-local download through the SDK source port. */
+export abstract class DownloadSource<
+  Options extends DownloadOptions = DownloadOptions,
+> implements SourceAdapter {
+  abstract readonly kind: Source['kind'];
+
+  constructor(protected readonly options: Options) {}
+
+  protected abstract resolveSource(
+    source: Source,
+    context: AdapterContext,
+  ): Promise<ResolvedSource>;
+  protected abstract download(
     resolved: ResolvedSource,
     context: AdapterContext,
     target: DownloadTarget,
   ): Promise<string>;
-}
-
-// Built-in sources share attempt isolation, cancellation and artifact fingerprinting.
-export function downloadAdapter(driver: SourceDriver, options: DownloadOptions): SourceAdapter {
-  function bounded(context: AdapterContext): AdapterContext {
+  private bounded(source: Source, context: AdapterContext): AdapterContext {
+    if (source.kind !== this.kind)
+      throw new MediaError('invalid_input', `Expected a ${this.kind} source`);
     return {
       ...context,
       signal: AbortSignal.any([
         context.signal,
-        AbortSignal.timeout(options.timeoutMs ?? 15 * 60_000),
+        AbortSignal.timeout(this.options.timeoutMs ?? 15 * 60_000),
       ]),
     };
   }
-  return {
-    resolve(source, context) {
-      return driver.resolve(source, bounded(context));
-    },
-    async materialize(resolved, context) {
-      const directory = options.files.workspace(context);
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      const attempt = bounded(context);
-      const maxBytes = options.maxDownloadBytes ?? 1024 * 1024 * 1024;
-      const path = await driver.download(resolved, attempt, {
-        directory,
-        path: join(directory, 'source-media'),
-        maxBytes,
-      });
-      attempt.signal.throwIfAborted();
-      if ((await stat(path)).size > maxBytes)
-        throw new Error('Media exceeds configured download limit');
-      return options.files.artifact(path, resolved.fileName || basename(path), resolved.mimeType);
-    },
-  };
+  async resolve(source: Source, context: AdapterContext): Promise<ResolvedSource> {
+    return this.resolveSource(source, this.bounded(source, context));
+  }
+  async materialize(resolved: ResolvedSource, context: AdapterContext) {
+    const attempt = this.bounded(resolved.source, context);
+    const directory = this.options.files.workspace(context);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const maxBytes = this.options.maxDownloadBytes ?? 1024 * 1024 * 1024;
+    const path = await this.download(resolved, attempt, {
+      directory,
+      path: join(directory, 'source-media'),
+      maxBytes,
+    });
+    attempt.signal.throwIfAborted();
+    if ((await stat(path)).size > maxBytes)
+      throw new Error('Media exceeds configured download limit');
+    return this.options.files.artifact(
+      path,
+      resolved.fileName || basename(path),
+      resolved.mimeType,
+    );
+  }
 }

@@ -24,3 +24,23 @@ const result = await sdk.get('owner', job.id);
 Jobs pin the selected provider model on submission. Idempotency keys are scoped to the owner and conflict if reused with a different normalized request. Workers rematerialize sources on every attempt, verify a content fingerprint, and reuse only successful chunk checkpoints. Non-overlapping chunks avoid duplicate transcript windows; timestamps are offset into the original media timeline. Failed jobs require explicit `retry`. Provider calls may repeat after process failure between an external response and its checkpoint; exactly-once provider billing is not guaranteed.
 
 Artifacts are opaque URIs plus filenames and stable fingerprints. Providers return relative timestamps within their chunk. Adapters must honor `AbortSignal`; cleanup must affect only the supplied job attempt. Media cleanup failure does not erase an already persisted result and is delivered to `onCleanupError`.
+
+### Replace one built-in provider
+
+The registries and concrete classes are exported by `@media-ingest/adapters`. Pass the same registries to `MediaSdk` after overriding a specific source or model. A source override implements `SourceAdapter`. A model registry override implements `NodeProviderAdapter`, including input format selection and translation, so the override controls every phase for that provider ID.
+
+```ts
+import { NodeFiles, NodeProviders, NodeSources } from '@media-ingest/adapters';
+import type { NodeProviderAdapter } from '@media-ingest/adapters';
+import type { SourceAdapter } from '@media-ingest/sdk';
+
+function makeAdapters(workRoot: string, instagram: SourceAdapter, gemini: NodeProviderAdapter) {
+  const files = new NodeFiles({ workRoot });
+  return {
+    sources: new NodeSources({ files, overrides: { instagram } }),
+    provider: new NodeProviders({ overrides: { 'google-gemini': gemini } }),
+  };
+}
+```
+
+See the [class hierarchy and extension points](../../docs/architecture.md#changing-a-source).

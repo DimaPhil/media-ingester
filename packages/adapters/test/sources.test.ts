@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NodeFiles } from '../src/files.js';
-import { NodeSources } from '../src/sources.js';
+import { NodeSources, YouTubeSource } from '../src/sources.js';
+import { YtDlpSourceRegistry } from '../src/source-registry.js';
 
 const mocks = vi.hoisted(() => ({
   run: vi.fn(),
@@ -42,6 +43,16 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 describe('source adapters', () => {
+  it('restricts standalone named adapters to their source in both phases', async () => {
+    const { files, context } = await setup();
+    const youtube = new YouTubeSource({ files }, new YtDlpSourceRegistry());
+    const source = { kind: 'x', uri: 'https://x.com/person/status/123' } as const;
+    await expect(youtube.resolve(source, context)).rejects.toThrow('Expected a youtube source');
+    await expect(
+      youtube.materialize({ source, fileName: 'post.mp4', metadata: {} }, context),
+    ).rejects.toThrow('Expected a youtube source');
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
   it('inspects HTTP metadata and downloads bounded streams', async () => {
     const { files, context } = await setup();
     const stream = Object.assign(Readable.from(['bytes']), {

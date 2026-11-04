@@ -2,7 +2,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NodeProviders, parseChunk, parseModelJson, parseOpenAi } from '../src/providers.js';
+import {
+  NodeProviders,
+  OpenAiProvider,
+  ClaudeCodeProvider,
+  parseChunk,
+  parseModelJson,
+  parseOpenAi,
+} from '../src/providers.js';
 import type { MediaRequest } from '@media-ingest/contracts';
 
 vi.mock('google-auth-library', () => ({
@@ -37,6 +44,42 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 describe('provider normalization', () => {
+  it('guards the selected provider when concrete adapters are used directly', async () => {
+    const paid = new OpenAiProvider({ apiKey: 'test' });
+    const file = await artifact();
+    const codex = { ...request, provider: 'codex' as const, targetLanguage: 'fr' };
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    expect(() => paid.resolveModel(codex)).toThrow('cannot handle');
+    await expect(paid.process(file, codex, context)).rejects.toThrow('cannot handle');
+    await expect(paid.translate('hello', codex, context)).rejects.toThrow('cannot handle');
+    await expect(new ClaudeCodeProvider().process(file, codex, context)).rejects.toThrow(
+      'cannot handle',
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('routes every SDK method to the selected override', async () => {
+    const output = { text: 'done', segments: [], timeRanges: [], detectedLanguage: null };
+    const override = {
+      resolveModel: vi.fn().mockReturnValue('custom'),
+      inputFormat: vi.fn().mockReturnValue('audio_pcm'),
+      chunkDurationMs: vi.fn().mockReturnValue(12000),
+      process: vi.fn().mockResolvedValue(output),
+      translate: vi.fn().mockResolvedValue('salut'),
+    };
+    const providers = new NodeProviders({ overrides: { openai: override } });
+    expect(providers.resolveModel(request)).toBe('custom');
+    expect(providers.chunkDurationMs(request)).toBe(12000);
+    expect(
+      providers.inputFormat(request, { durationMs: 1000, hasAudio: true, hasVideo: false }),
+    ).toBe('audio_pcm');
+    expect(await providers.process(await artifact(), request, context)).toEqual(output);
+    expect(await providers.translate('hi', { ...request, targetLanguage: 'fr' }, context)).toBe(
+      'salut',
+    );
+    expect(providers.resolveModel({ ...request, provider: 'google-speech' })).toBe('chirp_3');
+  });
   it('selects native video for Gemini and audio for audio-only providers and sources', () => {
     const provider = new NodeProviders();
     const video = { durationMs: 1000, hasAudio: true, hasVideo: true };

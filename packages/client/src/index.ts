@@ -37,6 +37,35 @@ export interface MediaClientOptions {
   timeoutMs?: number;
 }
 
+const httpErrorMessages: Partial<Record<number, string>> = {
+  401: 'Authentication failed; check MEDIA_API_TOKEN.',
+  403: 'Access denied.',
+  404: 'Resource not found.',
+  409: 'Conflict; inspect the job or idempotency key.',
+};
+
+async function readResponse<K extends OperationId>(id: K, response: Response): Promise<Output<K>> {
+  if (!response.ok) {
+    // Never reflect arbitrary server response bodies: they may contain credentials or upstream payloads.
+    const hint = httpErrorMessages[response.status] ?? `API returned HTTP ${response.status}.`;
+    throw new MediaClientError(hint, response.status, 'http_error');
+  }
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new MediaClientError('API returned invalid JSON', response.status, 'invalid_response');
+  }
+  const parsed = operations[id].output.safeParse(value);
+  if (!parsed.success)
+    throw new MediaClientError(
+      `API response does not match the ${id} contract`,
+      response.status,
+      'invalid_response',
+    );
+  return parsed.data as Output<K>;
+}
+
 /** HTTP only. This package deliberately has no dependency on the execution SDK. */
 export class MediaClient {
   private readonly baseUrl: string;
@@ -111,33 +140,6 @@ export class MediaClient {
         'network_error',
       );
     }
-    if (!response.ok) {
-      // Never reflect arbitrary server response bodies: they may contain credentials or upstream payloads.
-      const hint =
-        response.status === 401
-          ? 'Authentication failed; check MEDIA_API_TOKEN.'
-          : response.status === 403
-            ? 'Access denied.'
-            : response.status === 404
-              ? 'Resource not found.'
-              : response.status === 409
-                ? 'Conflict; inspect the job or idempotency key.'
-                : `API returned HTTP ${response.status}.`;
-      throw new MediaClientError(hint, response.status, 'http_error');
-    }
-    let value: unknown;
-    try {
-      value = await response.json();
-    } catch {
-      throw new MediaClientError('API returned invalid JSON', response.status, 'invalid_response');
-    }
-    const parsed = operation.output.safeParse(value);
-    if (!parsed.success)
-      throw new MediaClientError(
-        `API response does not match the ${id} contract`,
-        response.status,
-        'invalid_response',
-      );
-    return parsed.data as Output<K>;
+    return readResponse(id, response);
   }
 }

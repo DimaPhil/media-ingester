@@ -1,24 +1,16 @@
 import { execFile } from 'node:child_process';
-import { readFile, stat } from 'node:fs/promises';
-import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { Command } from 'commander';
 import { MediaClient } from '@media-ingest/client';
-import {
-  jsonSchema,
-  operationIds,
-  operations,
-  RELEASE_VERSION,
-  requestSchema,
-  type MediaRequest,
-  type Source,
-} from '@media-ingest/contracts';
+import { jsonSchema, operations, operationIds, RELEASE_VERSION } from '@media-ingest/contracts';
+import { registerCatalogCommands } from './catalog-commands.js';
+import { registerMediaCommands } from './media-commands.js';
 import { complete, completionScript } from './completion.js';
 import { loadConfig, saveConfig } from './config.js';
 
-const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
-type JsonOptions = { input?: string; file?: string };
+export { inferSource, uploadFile } from './media-commands.js';
+
 export interface CliIO {
   out: (value: string) => void;
   stdin: () => Promise<string>;
@@ -40,46 +32,6 @@ export const defaultIO: CliIO = {
   stdin: standardInput,
   env: process.env,
 };
-async function inputJSON(options: JsonOptions, io: CliIO): Promise<Record<string, unknown>> {
-  if (options.input && options.file) throw new Error('Use either --input or --file');
-  const text =
-    options.input ??
-    (options.file === '-'
-      ? await io.stdin()
-      : options.file
-        ? await readFile(options.file, 'utf8')
-        : '{}');
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error('Input must be valid JSON');
-  }
-  if (!data || typeof data !== 'object' || Array.isArray(data))
-    throw new Error('Input must be a JSON object');
-  return data as Record<string, unknown>;
-}
-export async function uploadFile(client: MediaClient, path: string) {
-  const info = await stat(path);
-  if (!info.isFile() || info.size > MAX_UPLOAD_BYTES)
-    throw new Error('Upload must be a regular file no larger than 32 MiB');
-  const bytes = await readFile(path);
-  if (bytes.length > MAX_UPLOAD_BYTES) throw new Error('Upload exceeds 32 MiB');
-  return client.call('upload', { fileName: basename(path), data: bytes.toString('base64') });
-}
-export function inferSource(uri: string, kind?: string): Source {
-  if (kind !== undefined) return { kind: kind as Source['kind'], uri };
-  if (/^tg:\/\//iu.test(uri)) return { kind: 'telegram', uri };
-  if (!/^https?:\/\//iu.test(uri)) return { kind: 'local_file', uri };
-  const host = URL.parse(uri)?.hostname ?? '';
-  if (/^(?:(?:www\.|m\.)?youtube\.com|youtu\.be)$/u.test(host)) return { kind: 'youtube', uri };
-  if (/^(?:www\.)?instagram\.com$/u.test(host)) return { kind: 'instagram', uri };
-  if (/^(?:www\.|mobile\.)?(?:x|twitter)\.com$/u.test(host)) return { kind: 'x', uri };
-  if (['drive.google.com', 'docs.google.com'].includes(host)) return { kind: 'google_drive', uri };
-  if (['t.me', 'telegram.me'].includes(host)) return { kind: 'telegram', uri };
-  return { kind: 'http', uri };
-}
-
 export function createProgram(io: CliIO = defaultIO): Command {
   const program = new Command()
     .name('media')
@@ -92,90 +44,8 @@ export function createProgram(io: CliIO = defaultIO): Command {
   const client = async () => new MediaClient(await loadConfig(io.env));
   const print = (value: unknown) => io.out(JSON.stringify(value, null, 2));
 
-  for (const id of operationIds) {
-    const operation = operations[id];
-    const command = program
-      .command(id)
-      .description(operation.description)
-      .option('--input <json>', 'JSON request object')
-      .option('--file <path>', 'Read JSON request from file; - reads stdin');
-    if (operation.path.includes(':id')) command.argument('[id]', 'Job UUID');
-    if (id === 'upload') command.argument('[path]', 'Local file to upload');
-    command.action(async (...args: unknown[]) => {
-      const positional = operation.path.includes(':id') || id === 'upload';
-      const value = positional ? (args[0] as string | undefined) : undefined;
-      const options = args[positional ? 1 : 0] as JsonOptions;
-      if (id === 'upload' && value) {
-        if (options.input || options.file)
-          throw new Error('Use upload <path> or a JSON request, not both');
-        print(await uploadFile(await client(), value));
-        return;
-      }
-      const input = await inputJSON(options, io);
-      if (value) {
-        if (input.id !== undefined && input.id !== value)
-          throw new Error('Positional ID conflicts with JSON ID');
-        input.id = value;
-      }
-      // Runtime catalog validation remains authoritative, including newly added commands.
-      print(await (await client()).call(id, input as never));
-    });
-  }
-
-  for (const [name, kind] of [
-    ['transcribe', 'transcription'],
-    ['understand', 'understanding'],
-  ] as const) {
-    program
-      .command(name)
-      .description(`Upload if local, then queue ${kind} through the API`)
-      .argument('<source>', 'File path or remote URI')
-      .option('--source-kind <kind>', 'Explicit source kind')
-      .option(
-        '--provider <provider>',
-        'Provider',
-        kind === 'understanding' ? 'google-gemini' : 'openai',
-      )
-      .option('--model <model>')
-      .option('--prompt <prompt>')
-      .option('--input-language <language>')
-      .option('--target-language <language>')
-      .option('--idempotency-key <key>')
-      .action(
-        async (
-          sourceValue: string,
-          options: {
-            sourceKind?: string;
-            provider: MediaRequest['provider'];
-            model?: string;
-            prompt?: string;
-            inputLanguage?: string;
-            targetLanguage?: string;
-            idempotencyKey?: string;
-          },
-        ) => {
-          const api = await client();
-          const source = inferSource(sourceValue, options.sourceKind);
-          const request = requestSchema.parse({
-            kind,
-            source,
-            provider: options.provider,
-            model: options.model,
-            prompt: options.prompt,
-            inputLanguage: options.inputLanguage,
-            targetLanguage: options.targetLanguage,
-          });
-          if (source.kind === 'local_file')
-            request.source = (await uploadFile(api, source.uri)).source;
-          print(
-            await api.call(
-              'submit',
-              operations.submit.input.parse({ request, idempotencyKey: options.idempotencyKey }),
-            ),
-          );
-        },
-      );
-  }
+  registerCatalogCommands(program, client, print, () => io.stdin());
+  registerMediaCommands(program, client, print);
   program
     .command('setup')
     .description('Save API URL and token with owner-only permissions')

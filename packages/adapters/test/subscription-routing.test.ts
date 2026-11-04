@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NodeProviders } from '../src/providers.js';
+import { CodexReasoner } from '../src/reasoning/codex.js';
+import { ClaudeReasoner } from '../src/reasoning/claude.js';
 import { transcribeCodexAudio } from '../src/codex-audio.js';
 import {
   understandSubscription,
@@ -104,7 +106,13 @@ describe('subscription provider dispatch', () => {
       expect(provider.inputFormat(request, { ...video, hasVideo: false })).toBe('audio_pcm');
       vi.mocked(understandSubscription).mockResolvedValue(output);
       expect(await provider.process(artifact, request, context)).toEqual(output);
-      expect(understandSubscription).toHaveBeenCalledWith(artifact, request, context, subscription);
+      expect(understandSubscription).toHaveBeenCalledWith(
+        artifact,
+        request,
+        context,
+        subscription,
+        expect.any(providerId === 'codex' ? CodexReasoner : ClaudeReasoner),
+      );
       vi.mocked(translateSubscription).mockResolvedValue('bonjour');
       expect(await provider.translate('hello', request, context)).toBe('bonjour');
     },
@@ -127,6 +135,7 @@ describe('subscription provider dispatch', () => {
       { ...request, model: 'chosen-model' },
       context,
       subscription,
+      expect.any(CodexReasoner),
     );
   });
 });
