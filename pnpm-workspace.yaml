@@ -1,3 +1,10 @@
 packages:
-  - apps/*
-  - packages/*
+  - apps/api
+  - packages/contracts
+  - packages/sdk
+  - packages/adapters
+  - packages/client
+  - packages/cli
+
+onlyBuiltDependencies:
+  - esbuild

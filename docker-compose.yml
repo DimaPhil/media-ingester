@@ -1,18 +1,20 @@
 services:
   api:
-    build:
-      context: .
+    build: .
     restart: unless-stopped
+    env_file: .env
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      MEDIA_INGEST_CONFIG_PATH: /app/config/app.yaml
-      YT_DLP_COOKIES_FROM_BROWSER: ${YT_DLP_COOKIES_FROM_BROWSER:-firefox}
+      MEDIA_WORK_ROOT: /data
+      MEDIA_CODEX_HOME: /auth/codex
+      MEDIA_CLAUDE_HOME: /auth/claude
     ports:
-      - '127.0.0.1:4000:4000'  # tailnet access: tailscale serve --tcp 4000
+      - '127.0.0.1:4000:4000'
     volumes:
-      - ./config/app.yaml:/app/config/app.yaml:ro
-      - ${MEDIA_INGEST_FIREFOX_DIR}:/root/.mozilla/firefox:ro
-      - media-ingest-tmp:/app/.tmp
-
+      - media-data:/data
+      - codex-auth:/auth/codex
+      - claude-auth:/auth/claude
+    stop_grace_period: 35s
 volumes:
-  media-ingest-tmp:
+  media-data:
+  codex-auth:
+  claude-auth:

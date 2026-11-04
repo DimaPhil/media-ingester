@@ -3,9 +3,14 @@ dist
 coverage
 .DS_Store
 .env
+.env.local
 config/app.yaml
 .tmp
 tmp
 *.log
 .pnpm-store
 *.tsbuildinfo
+.media
+release
+.artifact-review/
+.neon
