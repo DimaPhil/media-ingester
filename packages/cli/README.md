@@ -14,7 +14,7 @@ media get <job-id>
 media list --input '{"limit":10}'
 ```
 
-`MEDIA_API_URL` and `MEDIA_API_TOKEN` override `~/.config/media/config.json` (`XDG_CONFIG_HOME` is honored). Setup writes mode 0600 and never prints the token. Remote APIs require HTTPS; localhost HTTP works in development. Requests time out after two minutes. Mutations check the server's contract fingerprint first and fail closed on drift. API tokens must have the needed scopes.
+`MEDIA_API_URL` and `MEDIA_API_TOKEN` override `~/.lilfeel/media/config.json`. Setup writes mode 0600 and never prints the token. Remote APIs require HTTPS; localhost HTTP works in development. Requests time out after two minutes. Mutations check the server's contract fingerprint first and fail closed on drift. API tokens must have the needed scopes.
 
 `media <operation> --input '<json>'` and `--file request.json` cover every catalog operation. `--file -` reads JSON from stdin. `get` and `retry` also accept a positional job ID; `upload` accepts a local path. Local uploads and inline downloads are limited to 32 MiB. `download` emits base64 in JSON; remote-source processing can handle larger media within server limits. Save the submission's ID and poll `get`; submission does not wait for processing.
 
