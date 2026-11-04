@@ -3,6 +3,7 @@ dist
 coverage
 .DS_Store
 .env
+.env.local
 config/app.yaml
 .tmp
 tmp
@@ -12,3 +13,4 @@ tmp
 .media
 release
 .artifact-review/
+.neon

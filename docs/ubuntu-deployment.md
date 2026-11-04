@@ -28,6 +28,8 @@ Recreate the affected services after changing their environment. Verify that a p
 
 ## Start the service
 
+For Neon, link the desired project and branch with `neon init` and run `neon deploy` from the repository root. The [Neon policy](../neon.ts) uses Postgres. Transfer the pulled `DATABASE_URL` and `DATABASE_URL_UNPOOLED` to the service environment over SSH. The API uses the pooled connection and the explicit migration command prefers the direct connection. Keep both URLs out of Git.
+
 For the upload retention upgrade, stop every older API/worker instance sharing the database and media volume before starting the new version. Run the explicit migration first. Migration 002 does not backfill cleanup of historical completed jobs.
 
 Prepare the private service environment from [the example](../.env.example), back up the database and media volume, and configure the selected [providers](media-providers.md). Run the following in the reviewed Media Ingest checkout during deployment:

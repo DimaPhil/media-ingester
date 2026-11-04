@@ -1,7 +1,8 @@
 import postgres from 'postgres';
 import { applyMigrations } from '@media-ingest/adapters';
-if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+const connection = process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL;
+if (!connection) throw new Error('DATABASE_URL_UNPOOLED or DATABASE_URL is required');
+const sql = postgres(connection, { max: 1 });
 try {
   await applyMigrations(sql);
   console.log('Media schema is current');
