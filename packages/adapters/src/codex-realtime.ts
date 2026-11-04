@@ -32,8 +32,7 @@ export class CodexTranscript {
       !Number.isFinite(startMs) ||
       !Number.isFinite(endMs) ||
       startMs! < 0 ||
-      endMs! < startMs! ||
-      endMs! > this.durationMs
+      endMs! < startMs!
     )
       throw new Error('Codex returned invalid or out-of-bounds transcript timestamps');
     const next = { startMs: startMs!, endMs: endMs!, text: item.text };
@@ -52,7 +51,14 @@ export class CodexTranscript {
       .join('')
       .trim();
     if (!text) throw new Error('Codex returned an empty audio transcript');
-    return { text, segments, timeRanges: [], detectedLanguage: null };
+    return {
+      text,
+      segments: segments
+        .filter((segment) => segment.startMs <= this.durationMs)
+        .map((segment) => ({ ...segment, endMs: Math.min(segment.endMs, this.durationMs) })),
+      timeRanges: [],
+      detectedLanguage: null,
+    };
   }
 }
 
