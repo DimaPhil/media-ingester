@@ -9,11 +9,7 @@ export interface CliConfig {
   token: string;
 }
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(
-    env.XDG_CONFIG_HOME ?? join(env.HOME ?? homedir(), '.config'),
-    'media',
-    'config.json',
-  );
+  return join(env.HOME ?? homedir(), '.lilfeel', 'media', 'config.json');
 }
 export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<CliConfig> {
   let saved: Partial<CliConfig> = {};

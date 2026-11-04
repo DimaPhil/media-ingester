@@ -133,6 +133,9 @@ describe('CLI contract', () => {
   });
   it('setup stores a private config and never prints its token', async () => {
     const cli = await runner('my-token\n');
+    expect(configPath({ ...cli.env, XDG_CONFIG_HOME: '/unused' })).toBe(
+      join(cli.home, '.lilfeel', 'media', 'config.json'),
+    );
     await cli.run(['setup', '--url', 'https://media.example.com', '--token-stdin']);
     expect(cli.output.join('')).not.toContain('my-token');
     expect((await stat(configPath(cli.env))).mode & 0o777).toBe(0o600);
