@@ -158,7 +158,7 @@ describe('provider normalization', () => {
   });
 
   it('uses Google Speech v2 regional endpoint and normalizes fractional timestamps', async () => {
-    const file = await artifact();
+    const file = { ...(await artifact()), durationMs: 1241 };
     const fetcher = vi.fn().mockResolvedValue(
       Response.json({
         results: [
@@ -168,6 +168,12 @@ describe('provider normalization', () => {
               { transcript: 'hello', words: [{ startOffset: '0.125s', endOffset: '1.250s' }] },
             ],
           },
+          {
+            alternatives: [
+              { transcript: 'there', words: [{ startOffset: '1.3s', endOffset: '1.4s' }] },
+            ],
+          },
+          { alternatives: [{ transcript: 'friend' }] },
         ],
       }),
     );
@@ -180,7 +186,8 @@ describe('provider normalization', () => {
       { ...request, provider: 'google-speech', inputLanguage: 'en-US' },
       context,
     );
-    expect(output.segments[0]).toEqual({ startMs: 125, endMs: 1250, text: 'hello' });
+    expect(output.segments).toEqual([{ startMs: 125, endMs: 1241, text: 'hello' }]);
+    expect(output.text).toBe('hello there friend');
     expect(fetcher.mock.calls[0]![0]).toBe(
       'https://us-speech.googleapis.com/v2/projects/test/locations/us/recognizers/_:recognize',
     );

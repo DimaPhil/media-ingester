@@ -84,20 +84,30 @@ export class GoogleSpeechProvider extends ApiProvider {
       }>;
     };
     const results = payload.results ?? [];
+    const transcripts: string[] = [];
     const segments = results.flatMap((result) => {
       const alternative = result.alternatives?.[0];
       if (!alternative?.transcript) return [];
+      transcripts.push(alternative.transcript);
       const words = alternative.words ?? [];
+      const endOffset = words.at(-1)?.endOffset;
+      if (!endOffset) return [];
+      const startMs = Math.round(parseFloat(words[0]?.startOffset ?? '0') * 1000);
+      const endMs = Math.min(
+        Math.round(parseFloat(endOffset) * 1000),
+        artifact.durationMs ?? Infinity,
+      );
+      if (!(startMs >= 0 && startMs <= endMs && Number.isFinite(endMs))) return [];
       return [
         {
-          startMs: Math.round(parseFloat(words[0]?.startOffset ?? '0') * 1000),
-          endMs: Math.round(parseFloat(words.at(-1)?.endOffset ?? '0') * 1000),
+          startMs,
+          endMs,
           text: alternative.transcript,
         },
       ];
     });
     return parseChunk({
-      text: segments.map((segment) => segment.text).join(' '),
+      text: transcripts.join(' '),
       segments,
       detectedLanguage: results.find((result) => result.languageCode)?.languageCode ?? null,
     });
