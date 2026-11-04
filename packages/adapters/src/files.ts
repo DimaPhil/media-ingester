@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { AdapterContext, Artifact } from '@media-ingest/sdk';
 import { MediaError } from '@media-ingest/sdk';
-import type { Source } from '@media-ingest/contracts';
+import { MAX_INLINE_MEDIA_BYTES, type Source } from '@media-ingest/contracts';
 
-export const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
+export { MAX_INLINE_MEDIA_BYTES as MAX_UPLOAD_BYTES } from '@media-ingest/contracts';
+
 export function safeName(value: string): string {
   return (
     Array.from(basename(value.replaceAll('\\', '/')))
@@ -27,7 +28,7 @@ export class NodeFiles {
   readonly maxUploadBytes: number;
   constructor(options: { workRoot: string; maxUploadBytes?: number }) {
     this.workRoot = resolve(options.workRoot);
-    this.maxUploadBytes = options.maxUploadBytes ?? MAX_UPLOAD_BYTES;
+    this.maxUploadBytes = options.maxUploadBytes ?? MAX_INLINE_MEDIA_BYTES;
   }
   workspace(context: AdapterContext): string {
     if (!Number.isInteger(context.attempt) || context.attempt < 0)
@@ -113,6 +114,33 @@ export class NodeFiles {
     )
       throw new Error('Invalid upload metadata');
     return { fileName: safeName(metadata.fileName), path: join(directory, 'media') };
+  }
+  async readArtifact(artifact: Artifact, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
+    signal.throwIfAborted();
+    const file = await open(artifact.uri, 'r');
+    try {
+      const info = await file.stat();
+      if (!info.isFile()) throw new Error('Expected a regular media file');
+      const tooLarge = () =>
+        new MediaError('payload_too_large', 'Download exceeds inline media size limit');
+      if (info.size > maxBytes) throw tooLarge();
+      const data = Buffer.alloc(info.size);
+      let offset = 0;
+      while (offset < data.length) {
+        signal.throwIfAborted();
+        const { bytesRead } = await file.read(data, offset, data.length - offset);
+        if (!bytesRead) throw new Error('Media file changed during download');
+        offset += bytesRead;
+      }
+      // Reading the same descriptor prevents a path replacement or growing file from bypassing the cap.
+      if ((await file.read(Buffer.alloc(1))).bytesRead) {
+        if ((await file.stat()).size > maxBytes) throw tooLarge();
+        throw new Error('Media file changed during download');
+      }
+      return data;
+    } finally {
+      await file.close();
+    }
   }
   async artifact(path: string, fileName: string, mimeType?: string): Promise<Artifact> {
     const info = await stat(path);

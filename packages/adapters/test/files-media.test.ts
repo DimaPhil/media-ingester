@@ -6,6 +6,7 @@ import { NodeFiles, safeName } from '../src/files.js';
 import { NodeMedia, runCommand } from '../src/media.js';
 import { NodeSources } from '../src/sources.js';
 import { z } from 'zod';
+import { MediaSdk } from '@media-ingest/sdk';
 
 const roots: string[] = [];
 async function setup() {
@@ -125,6 +126,112 @@ describe('owned media files', () => {
   });
 });
 describe('ffmpeg adapter', () => {
+  it.each(['jpg', 'png', 'webp'])(
+    'understands an uploaded %s as one silent frame and rejects transcription',
+    async (extension) => {
+      const { root, files, context } = await setup();
+      const path = join(root, 'photo.' + extension);
+      // Some ffmpeg builds decode WebP without shipping a WebP encoder.
+      if (extension === 'webp')
+        await writeFile(
+          path,
+          Buffer.from(
+            'UklGRkoAAABXRUJQVlA4ID4AAAAQAwCdASogAB4APpFCnEolo6KhqAgAsBIJZQDMHBapagAA/vVYv/+5wP/9nA//2cD+Ov9eqWuTjgLLeAAAAA==',
+            'base64',
+          ),
+        );
+      else
+        await runCommand(
+          'ffmpeg',
+          ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=32x30', '-frames:v', '1', path],
+          context.signal,
+        );
+      const source = (
+        await files.upload('owner', 'photo', (await readFile(path)).toString('base64'))
+      ).source;
+      const media = new NodeMedia({ files });
+      let calls = 0;
+      const sdk = new MediaSdk({
+        sources: new NodeSources({ files }),
+        media,
+        provider: {
+          resolveModel: () => 'fixture',
+          chunkDurationMs: () => 60_000,
+          process: async (chunk, _request, ctx) => {
+            calls++;
+            expect(chunk.mimeType).toBe('video/mp4');
+            expect(await media.inspect(chunk, ctx)).toEqual({
+              durationMs: 40,
+              hasVideo: true,
+              hasAudio: false,
+            });
+            return { text: 'Blue photo', detectedLanguage: null, timeRanges: [], segments: [] };
+          },
+        },
+      });
+      const job = await sdk.submit('owner', {
+        kind: 'understanding',
+        provider: 'codex',
+        source,
+        prompt: 'Describe this photo',
+      });
+      await sdk.runNext();
+      expect((await sdk.get('owner', job.id)).result?.text).toBe('Blue photo');
+      const spoken = await sdk.submit('owner', {
+        kind: 'transcription',
+        provider: 'codex',
+        source,
+      });
+      await sdk.runNext();
+      expect((await sdk.get('owner', spoken.id)).error).toMatchObject({
+        code: 'invalid_media',
+        message: 'Source has no audio',
+      });
+      expect(calls).toBe(1);
+    },
+  );
+  it('rejects animated PNGs and concatenated JPEGs without discarding their later frames', async () => {
+    const { root, files, context } = await setup();
+    const media = new NodeMedia({ files });
+    const apng = join(root, 'animation.png');
+    await runCommand(
+      'ffmpeg',
+      [
+        '-v',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        'testsrc=size=32x32:rate=2:duration=1',
+        '-f',
+        'apng',
+        apng,
+      ],
+      context.signal,
+    );
+    await expect(media.inspect(await files.artifact(apng, 'photo.png'), context)).rejects.toThrow(
+      'Animated',
+    );
+    const jpeg = join(root, 'multi.jpg');
+    await runCommand(
+      'ffmpeg',
+      [
+        '-v',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        'testsrc=size=32x32:rate=2:duration=1',
+        '-f',
+        'mjpeg',
+        jpeg,
+      ],
+      context.signal,
+    );
+    await expect(media.inspect(await files.artifact(jpeg, 'photo.jpg'), context)).rejects.toThrow(
+      'one bounded photo frame',
+    );
+  });
   it('keeps a full subscription audio chunk at exactly sixty seconds without encoder padding', async () => {
     const { root, files, context } = await setup();
     const path = join(root, 'minute.wav');

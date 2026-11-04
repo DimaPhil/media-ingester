@@ -182,6 +182,8 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
     await repository.retry(pending.ownerId, pending.id, 2005);
     const retry = (await repository.claim(2006, 60_000))!;
     expect(retry.job.chunks['0']).toEqual(output);
+    // JSONB may return chunk properties in a different order from the submitted plan.
+    await repository.savePlan(pending.id, retry.token, plan, 'sha256:original', 2007);
     await expect(
       repository.savePlan(pending.id, retry.token, plan, 'sha256:changed', 2007),
     ).rejects.toMatchObject({ code: 'source_changed' });

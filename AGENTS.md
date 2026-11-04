@@ -1,6 +1,6 @@
 # Working on Media Ingest
 
-Read README.md for commands, docs/architecture.md for invariants, and docs/agent-context.md for provider decisions and unfinished live validation. The visual design is .artifact-review/architecture.html; keep it consistent when changing boundaries or data models.
+Read README.md for commands, docs/architecture.md for invariants, and docs/agent-context.md for provider decisions and unfinished live validation. Keep local visual review artifacts outside Git.
 
 - Use pnpm 10.6.1, TypeScript ESM/NodeNext, oxlint and oxfmt. Keep Markdown paragraphs on one physical line.
 - Contracts are the single catalog for REST, CLI and MCP. Express constraints structurally so JSON Schema matches runtime validation. Add new behavior in the API dispatcher and parity tests.

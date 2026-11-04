@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
   safe: vi.fn(),
   token: vi.fn().mockResolvedValue('google-token'),
 }));
-vi.mock('../src/media.js', () => ({ runCommand: mocks.run }));
+vi.mock('../src/run-command.js', () => ({ runCommand: mocks.run }));
 vi.mock('google-auth-library', () => ({
   GoogleAuth: class {
     getAccessToken = mocks.token;
@@ -181,10 +181,21 @@ describe('source adapters', () => {
     });
     const fetcher = vi
       .fn()
-      .mockResolvedValueOnce(Response.json({ data: { peer: { id: 'chat' } } }))
+      .mockResolvedValueOnce(Response.json({ data: { peer: { id: '-100123' } }, meta: {} }))
       .mockResolvedValueOnce(
         Response.json({
-          data: [{ media_id: 'm1', file_name: 'clip.mp4', mime_type: 'video/mp4' }],
+          data: [
+            {
+              media_id: '10:0',
+              message_id: '10',
+              kind: 'video',
+              file_name: 'clip.mp4',
+              mime_type: 'video/mp4',
+              access_path: 'https://untrusted.invalid',
+              telegram_raw: { private: 'never return' },
+            },
+          ],
+          meta: { include_album: false },
         }),
       )
       .mockResolvedValueOnce(new Response('telegram bytes'));
@@ -194,9 +205,19 @@ describe('source adapters', () => {
     expect(resolved.fileName).toBe('clip.mp4');
     expect((await sources.materialize(resolved, context)).fingerprint).toHaveLength(64);
     expect(fetcher.mock.calls[0]![1].redirect).toBe('error');
-    expect(fetcher.mock.calls[2]![0]).toContain('/chats/chat/messages/10/media/m1');
+    expect(resolved.metadata).toEqual({ chatId: '-100123', message: 10, mediaId: '10:0' });
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      'http://127.0.0.1:8080/resolve?value=%40channel',
+      'http://127.0.0.1:8080/chats/-100123/messages/10/media?include_album=false',
+      'http://127.0.0.1:8080/chats/-100123/messages/10/media/10%3A0',
+    ]);
+    for (const [, init] of fetcher.mock.calls)
+      expect(init).toMatchObject({
+        headers: { Authorization: 'Bearer proxy-token' },
+        redirect: 'error',
+      });
     fetcher
-      .mockResolvedValueOnce(Response.json({ data: { peer: { id: 'chat' } } }))
+      .mockResolvedValueOnce(Response.json({ data: { peer: { id: '-100123' } } }))
       .mockResolvedValueOnce(Response.json({ data: [] }));
     await expect(sources.resolve(source, context)).rejects.toThrow('exactly one');
     await expect(new NodeSources({ files }).resolve(source, context)).rejects.toThrow(
@@ -204,5 +225,74 @@ describe('source adapters', () => {
     );
     fetcher.mockResolvedValueOnce(new Response(null, { status: 500 }));
     await expect(sources.resolve(source, context)).rejects.toThrow('500');
+  });
+  it.each([
+    ['voice', null, 'audio/ogg'],
+    ['audio', 'audio/mpeg', 'audio/mpeg'],
+    ['video_note', null, 'video/mp4'],
+    ['photo', null, 'image/jpeg'],
+    ['document', 'video/webm', 'video/webm'],
+  ])(
+    'selects exact private message %s media without peer lookup',
+    async (kind, mime_type, mimeType) => {
+      const { files, context } = await setup();
+      const sources = new NodeSources({ files, telegramBaseUrl: 'https://proxy.test' });
+      const fetcher = vi.fn().mockResolvedValueOnce(
+        Response.json({
+          data: [
+            { message_id: '40', media_id: '40:0', kind: 'audio' },
+            { message_id: '42', media_id: '42:0', kind, mime_type },
+          ],
+        }),
+      );
+      vi.stubGlobal('fetch', fetcher);
+      const resolved = await sources.resolve(
+        { kind: 'telegram', uri: 'tg://chat/123456/42' },
+        context,
+      );
+      expect(resolved).toMatchObject({
+        mimeType,
+        metadata: { chatId: '123456', message: 42, mediaId: '42:0' },
+      });
+      expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+        'https://proxy.test/chats/123456/messages/42/media?include_album=false',
+      ]);
+    },
+  );
+  it('rejects unsupported documents, ambiguous manifests and wrong-message locators', async () => {
+    const { files, context } = await setup();
+    const sources = new NodeSources({ files, telegramBaseUrl: 'https://proxy.test' });
+    const item = { kind: 'voice', media_id: '42:0', message_id: '42' };
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    for (const data of [
+      [{ ...item, kind: 'document', mime_type: 'application/pdf' }],
+      [item, { ...item, media_id: '42:1' }],
+      [{ ...item, media_id: '41:0' }],
+    ]) {
+      fetcher.mockResolvedValueOnce(Response.json({ data }));
+      await expect(
+        sources.resolve({ kind: 'telegram', uri: 'https://t.me/c/123/42' }, context),
+      ).rejects.toThrow('exactly one supported');
+    }
+  });
+  it('routes both phases to the selected source override while preserving other defaults', async () => {
+    const { files, context } = await setup();
+    const source = { kind: 'telegram' as const, uri: 'tg://chat/123/42' };
+    const resolved = { source, fileName: 'custom', metadata: {} };
+    const artifact = { uri: '/tmp/custom', fileName: 'custom', fingerprint: 'override' };
+    const override = {
+      resolve: vi.fn().mockResolvedValue(resolved),
+      materialize: vi.fn().mockResolvedValue(artifact),
+    };
+    const sources = new NodeSources({ files, overrides: { telegram: override } });
+    expect(await sources.materialize(await sources.resolve(source, context), context)).toEqual(
+      artifact,
+    );
+    expect(override.resolve).toHaveBeenCalledWith(source, context);
+    expect(override.materialize).toHaveBeenCalledWith(resolved, context);
+    await expect(
+      sources.resolve({ kind: 'google_drive', uri: 'invalid' }, context),
+    ).rejects.toThrow('absolute');
   });
 });

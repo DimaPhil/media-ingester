@@ -1,5 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve, relative } from 'node:path';
+import ts from 'typescript';
 import {
   RELEASE_VERSION,
   operationIds,
@@ -46,10 +47,7 @@ for (const [name, dependencies] of Object.entries(allowed)) {
   for (const path of await files(resolve(directory, 'src'))) {
     if (!path.endsWith('.ts')) continue;
     const source = await readFile(path, 'utf8');
-    for (const match of source.matchAll(
-      /(?:from\s*|import\s*\(|require\s*\()\s*['"]([^'"]+)['"]/g,
-    )) {
-      const specifier = match[1]!;
+    for (const { fileName: specifier } of ts.preProcessFile(source, true, true).importedFiles) {
       if (
         specifier.startsWith('@media-ingest/') &&
         !dependencies.includes(specifier.slice('@media-ingest/'.length))
@@ -59,9 +57,10 @@ for (const [name, dependencies] of Object.entries(allowed)) {
         failures.push(`${relative(root, path)}: import escapes package`);
       if (
         name === 'sdk' &&
-        /^(?:node:)?(?:fs|http|https|net|child_process)(?:\/|$)/.test(specifier)
+        !specifier.startsWith('.') &&
+        !['@media-ingest/contracts', 'node:crypto', 'node:util'].includes(specifier)
       )
-        failures.push(`${relative(root, path)}: SDK imports infrastructure`);
+        failures.push(`${relative(root, path)}: unapproved SDK dependency ${specifier}`);
     }
   }
 }

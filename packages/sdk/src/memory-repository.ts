@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { MediaResult, JobView } from '@media-ingest/contracts';
 import { LeaseLostError, MediaError } from './errors.js';
 import type { Chunk, ChunkOutput, JobRecord, JobRepository, Lease, ListJobs } from './ports.js';
@@ -91,7 +92,7 @@ export class MemoryJobRepository implements JobRepository {
         'source_changed',
         'Source bytes changed since the saved chunks; submit a new job',
       );
-    if (job.plan !== null && JSON.stringify(job.plan) !== JSON.stringify(plan))
+    if (job.plan !== null && !isDeepStrictEqual(job.plan, plan))
       throw new MediaError('plan_changed', 'Chunk plan changed since it was saved');
     job.plan = structuredClone(plan);
     job.sourceFingerprint = sourceFingerprint;

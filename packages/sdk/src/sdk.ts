@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   jobSchema,
   requestSchema,
@@ -41,6 +42,21 @@ export function planChunks(
   }));
 }
 
+type Provenance = NonNullable<MediaResult['provenance']>;
+
+function mergeProvenanceField<K extends keyof Provenance>(
+  target: Provenance,
+  source: Provenance,
+  field: K,
+): void {
+  const next = source[field];
+  if (next === undefined) return;
+  if (target[field] !== undefined && !isDeepStrictEqual(target[field], next)) {
+    throw new MediaError('inconsistent_provenance', `Chunk provenance disagrees on ${field}`);
+  }
+  target[field] = next;
+}
+
 export function aggregate(
   plan: Chunk[],
   outputs: Record<string, ChunkOutput>,
@@ -62,7 +78,9 @@ export function aggregate(
     if (!output) throw new MediaError('missing_chunk', 'A completed chunk is missing');
     texts.push(output.text);
     if (output.provenance) {
-      result.provenance = { ...result.provenance, ...output.provenance };
+      const merged = (result.provenance ??= {});
+      mergeProvenanceField(merged, output.provenance, 'transcription');
+      mergeProvenanceField(merged, output.provenance, 'frameIntervalMs');
     }
     result.detectedLanguage ??= output.detectedLanguage;
     for (const segment of output.segments)
@@ -258,17 +276,8 @@ export class MediaSdk {
           }
         },
       );
-      // Wait for every in-flight write before marking failure or cleaning artifacts.
-      const outcomes = await Promise.allSettled(
-        runners.map((runner) =>
-          runner.catch((error) => {
-            abort.abort(error);
-            throw error;
-          }),
-        ),
-      );
-      const failed = outcomes.find((outcome) => outcome.status === 'rejected');
-      if (failed?.status === 'rejected') throw failed.reason;
+      // AbortController preserves the first cause. Drain canceled siblings before recording it.
+      await Promise.all(runners.map((runner) => runner.catch((error) => abort.abort(error))));
       abort.signal.throwIfAborted();
       const result = aggregate(plan, job.chunks, job.request);
       if (job.request.targetLanguage) {

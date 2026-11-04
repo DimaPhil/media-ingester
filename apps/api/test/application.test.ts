@@ -1,7 +1,4 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MediaError,
@@ -10,7 +7,12 @@ import {
   type ProviderAdapter,
   type SourceAdapter,
 } from '@media-ingest/sdk';
-import { operationIds, type JobView, type Source } from '@media-ingest/contracts';
+import {
+  MAX_INLINE_MEDIA_BYTES,
+  operationIds,
+  type JobView,
+  type Source,
+} from '@media-ingest/contracts';
 import { createApplication, contractHash } from '../src/application.js';
 import { MemoryAuthStore } from '../src/auth/index.js';
 import { MediaClient } from '../../../packages/client/src/index.js';
@@ -18,8 +20,8 @@ import { MediaClient } from '../../../packages/client/src/index.js';
 const publicUrl = 'http://localhost:4000';
 const ownerToken = 'unit-test-owner-token-with-at-least-thirty-two-characters';
 const source: Source = { kind: 'http', uri: 'https://example.com/media.wav' };
-let directory: string;
-let artifactPath: string;
+const artifactPath = 'memory://bucket/fixture';
+const readArtifact = vi.fn(async () => Buffer.from('fixture'));
 let application: ReturnType<typeof createApplication>;
 let sdk: MediaSdk;
 let authStore: MemoryAuthStore;
@@ -121,16 +123,13 @@ beforeEach(async () => {
   upload
     .mockReset()
     .mockImplementation(async () => ({ source: { kind: 'upload', uri: randomUUID() }, size: 3 }));
-  directory = await mkdtemp(join(tmpdir(), 'media-api-unit-'));
-  artifactPath = join(directory, 'fixture.wav');
-  await writeFile(artifactPath, 'fixture');
   sdk = new MediaSdk({ sources, media, provider });
   authStore = new MemoryAuthStore();
   application = createApplication({
     sdk,
     sources,
     media,
-    files: { upload },
+    files: { upload, readArtifact },
     publicUrl,
     ownerToken,
     authStore,
@@ -140,7 +139,6 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await application.close();
-  await rm(directory, { recursive: true, force: true });
 });
 
 describe('application security boundary', () => {
@@ -318,6 +316,11 @@ describe('download lifecycle', () => {
   it('returns bounded file content and cleans the materialization workspace', async () => {
     const response = await post('/v1/downloads', { source });
     expect(response.status).toBe(200);
+    expect(readArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({ uri: artifactPath }),
+      MAX_INLINE_MEDIA_BYTES,
+      expect.any(AbortSignal),
+    );
     expect(await response.json()).toEqual({
       fileName: 'media.wav',
       data: Buffer.from('fixture').toString('base64'),
@@ -328,7 +331,7 @@ describe('download lifecycle', () => {
   });
 
   it('cleans up oversized media and failed downloads', async () => {
-    await truncate(artifactPath, 33 * 1024 * 1024);
+    readArtifact.mockRejectedValueOnce(new MediaError('payload_too_large', 'Download too large'));
     expect((await post('/v1/downloads', { source })).status).toBe(413);
     expect(cleanup).toHaveBeenCalledOnce();
     materialize.mockRejectedValueOnce(new Error('sensitive source failure'));

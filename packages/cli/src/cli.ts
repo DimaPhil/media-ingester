@@ -67,15 +67,17 @@ export async function uploadFile(client: MediaClient, path: string) {
   if (bytes.length > MAX_UPLOAD_BYTES) throw new Error('Upload exceeds 32 MiB');
   return client.call('upload', { fileName: basename(path), data: bytes.toString('base64') });
 }
-function inferSource(value: string, kind?: string): Source {
-  const resolved =
-    kind ??
-    (/^https?:\/\//u.test(value)
-      ? /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//u.test(value)
-        ? 'youtube'
-        : 'http'
-      : 'local_file');
-  return { kind: resolved as Source['kind'], uri: value };
+export function inferSource(uri: string, kind?: string): Source {
+  if (kind !== undefined) return { kind: kind as Source['kind'], uri };
+  if (/^tg:\/\//iu.test(uri)) return { kind: 'telegram', uri };
+  if (!/^https?:\/\//iu.test(uri)) return { kind: 'local_file', uri };
+  const host = URL.parse(uri)?.hostname ?? '';
+  if (/^(?:(?:www\.|m\.)?youtube\.com|youtu\.be)$/u.test(host)) return { kind: 'youtube', uri };
+  if (/^(?:www\.)?instagram\.com$/u.test(host)) return { kind: 'instagram', uri };
+  if (/^(?:www\.|mobile\.)?(?:x|twitter)\.com$/u.test(host)) return { kind: 'x', uri };
+  if (['drive.google.com', 'docs.google.com'].includes(host)) return { kind: 'google_drive', uri };
+  if (['t.me', 'telegram.me'].includes(host)) return { kind: 'telegram', uri };
+  return { kind: 'http', uri };
 }
 
 export function createProgram(io: CliIO = defaultIO): Command {

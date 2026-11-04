@@ -1,35 +1,19 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import {
-  contractDocument,
   operationIds,
   operations,
   openApiDocument,
   RELEASE_VERSION,
-  type OperationId,
-  type Source,
 } from '@media-ingest/contracts';
-import {
-  MediaError,
-  type MediaSdk,
-  type SourceAdapter,
-  type MediaAdapter,
-  type AdapterContext,
-} from '@media-ingest/sdk';
+import { MediaError } from '@media-ingest/sdk';
 import { createAuth, type AuthStore, type Identity } from './auth/index.js';
+import { contractHash, createDispatcher, type OperationDependencies } from './operations.js';
 
-export const contractHash = createHash('sha256')
-  .update(JSON.stringify(contractDocument()))
-  .digest('hex');
-export interface ApplicationOptions {
-  sdk: MediaSdk;
-  sources: SourceAdapter;
-  media: MediaAdapter;
-  files: { upload(ownerId: string, fileName: string, data: string): Promise<unknown> };
+export { contractHash };
+export interface ApplicationOptions extends OperationDependencies {
   authStore: AuthStore;
   publicUrl: string;
   ownerToken: string;
@@ -46,84 +30,7 @@ export function createApplication(options: ApplicationOptions) {
   });
   const app = new Hono<{ Variables: { identity: Identity } }>();
   const report = options.logger ?? (() => {});
-  const dispatch = async (
-    ownerId: string,
-    scopes: string[],
-    id: OperationId,
-    input: unknown,
-  ): Promise<unknown> => {
-    const operation = operations[id];
-    if (operation.scope !== null && !scopes.includes(operation.scope))
-      throw new MediaError('forbidden', 'Required scope was not granted');
-    const data = operation.input.parse(input);
-    let output: unknown;
-    switch (id) {
-      case 'submit': {
-        const value = operations.submit.input.parse(data);
-        output = await options.sdk.submit(ownerId, value.request, value.idempotencyKey);
-        break;
-      }
-      case 'get':
-        output = await options.sdk.get(ownerId, operations.get.input.parse(data).id);
-        break;
-      case 'list':
-        output = { items: await options.sdk.list(ownerId, operations.list.input.parse(data)) };
-        break;
-      case 'retry':
-        output = await options.sdk.retry(ownerId, operations.retry.input.parse(data).id);
-        break;
-      case 'info':
-        output = { version: RELEASE_VERSION, contractHash };
-        break;
-      case 'upload': {
-        const value = operations.upload.input.parse(data);
-        output = await options.files.upload(ownerId, value.fileName, value.data);
-        break;
-      }
-      case 'resolve': {
-        const context: AdapterContext = {
-          ownerId,
-          jobId: randomUUID(),
-          attempt: 0,
-          signal: AbortSignal.timeout(120000),
-        };
-        output = await options.sources.resolve(
-          operations.resolve.input.parse(data).source,
-          context,
-        );
-        break;
-      }
-      case 'download': {
-        const context: AdapterContext = {
-          ownerId,
-          jobId: randomUUID(),
-          attempt: 0,
-          signal: AbortSignal.timeout(120000),
-        };
-        try {
-          const source: Source = operations.download.input.parse(data).source;
-          const resolved = await options.sources.resolve(source, context);
-          const artifact = await options.sources.materialize(resolved, context);
-          if ((await stat(artifact.uri)).size > 32 * 1024 * 1024)
-            throw new MediaError(
-              'payload_too_large',
-              'Downloads through the API are limited to 32 MiB',
-            );
-          output = {
-            fileName: artifact.fileName,
-            data: (await readFile(artifact.uri)).toString('base64'),
-            mimeType: artifact.mimeType,
-          };
-        } finally {
-          await options.media.cleanup(context);
-        }
-        break;
-      }
-    }
-    const validated = operation.output.safeParse(output);
-    if (!validated.success) throw new Error('Operation produced an invalid response');
-    return validated.data;
-  };
+  const dispatch = createDispatcher(options);
 
   const mcp = createMcpHandler(
     ({ authInfo }) => {

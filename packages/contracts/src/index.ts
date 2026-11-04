@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const RELEASE_VERSION = '1.0.0';
 export const API_VERSION = 'v1';
+export const MAX_INLINE_MEDIA_BYTES = 32 * 1024 * 1024;
 export const sourceSchema = z
   .object({
     kind: z.enum([
@@ -193,7 +194,10 @@ export const operations = {
     description: 'Upload a local media file (base64, maximum 32 MiB)',
     scope: 'media:write',
     input: z
-      .object({ fileName: z.string().min(1).max(255), data: z.string().max(44739244) })
+      .object({
+        fileName: z.string().min(1).max(255),
+        data: z.string().max(Math.ceil(MAX_INLINE_MEDIA_BYTES / 3) * 4),
+      })
       .strict(),
     output: z.object({ source: remoteSourceSchema, size: z.number().int().nonnegative() }),
   },

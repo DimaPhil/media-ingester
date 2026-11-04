@@ -13,7 +13,7 @@ Private media transcription and understanding service. The `media` CLI calls the
 | `packages/cli`       | Bundled `media` executable, completion and agent skill                       |
 | `apps/api`           | REST/MCP, private-owner OAuth, worker composition                            |
 
-See [architecture](docs/architecture.md), [provider setup](docs/media-providers.md), [SDK embedding](packages/sdk/README.md), [CLI setup](packages/cli/README.md), and the [HTML design](.artifact-review/architecture.html). Future sessions should start with [agent context](docs/agent-context.md). This is a fresh schema and API; old database records are not migrated.
+See [architecture](docs/architecture.md), [provider setup](docs/media-providers.md), [Ubuntu deployment](docs/ubuntu-deployment.md), [SDK embedding](packages/sdk/README.md), and [CLI setup](packages/cli/README.md). Future sessions should start with [agent context](docs/agent-context.md). This is a fresh schema and API; old database records are not migrated.
 
 ## Run
 

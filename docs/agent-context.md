@@ -29,17 +29,18 @@ flowchart LR
 
 ## Where changes belong
 
-| Area                                             | Owning source                                                                    |
-| ------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Wire DTOs, provider IDs, operation catalog       | `packages/contracts/src/index.ts`                                                |
-| Durable jobs, interfaces, aggregation            | `packages/sdk/src`                                                               |
-| Sources, media tools, API providers              | `packages/adapters/src`                                                          |
-| Subscription audio                               | `packages/adapters/src/codex-audio.ts`                                           |
-| Subscription understanding and process isolation | `packages/adapters/src/subscription-understanding.ts`, `subscription-runtime.ts` |
-| Server config and composition                    | `apps/api/src/config.ts`, `main.ts`                                              |
-| REST/MCP and authentication                      | `apps/api/src/application.ts`, `auth/`                                           |
-| HTTP client and distributable CLI                | `packages/client`, `packages/cli`                                                |
-| Release and dependency enforcement               | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`         |
+| Area                                              | Owning source                                                                    |
+| ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Wire DTOs, provider IDs, operation catalog        | `packages/contracts/src/index.ts`                                                |
+| Durable jobs, interfaces, aggregation             | `packages/sdk/src`                                                               |
+| Source registration and implementations           | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`             |
+| Media inspection, model routing and API providers | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                   |
+| Subscription audio                                | `packages/adapters/src/codex-audio.ts`                                           |
+| Subscription understanding and process isolation  | `packages/adapters/src/subscription-understanding.ts`, `subscription-runtime.ts` |
+| Server config and composition                     | `apps/api/src/config.ts`, `main.ts`                                              |
+| REST/MCP, shared dispatcher and authentication    | `apps/api/src/application.ts`, `operations.ts`, `auth/`                          |
+| HTTP client and distributable CLI                 | `packages/client`, `packages/cli`                                                |
+| Release and dependency enforcement                | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`         |
 
 ## Checks and operating constraints
 

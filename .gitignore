@@ -11,6 +11,4 @@ tmp
 *.tsbuildinfo
 .media
 release
-!.artifact-review/
-.artifact-review/*
-!.artifact-review/architecture.html
+.artifact-review/

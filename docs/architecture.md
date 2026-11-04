@@ -1,6 +1,6 @@
 # Architecture and invariants
 
-The full visual reference is [architecture.html](../.artifact-review/architecture.html). This page records the constraints future changes must preserve.
+This page records the package boundaries and invariants future changes must preserve.
 
 ```mermaid
 flowchart LR
@@ -23,6 +23,12 @@ flowchart LR
 ## Ownership
 
 Contracts own public validation and metadata. SDK owns orchestration and ports, with no vendor, SQL, network or filesystem implementation. Adapters own those implementations. API is the composition root. CLI only performs HTTP, local config and upload preparation. MCP is colocated with the API and uses the same authorization/dispatcher; it does not execute a second pipeline.
+
+### Changing a source
+
+Start in [the source implementations](../packages/adapters/src/sources/). Each integration owns both phases of ingestion. `resolve` identifies one media item and its metadata. `materialize` retrieves its bytes for a specific job attempt. Keeping those phases together lets the Google Drive and Telegram integrations each own their identifier, credentials and download protocol.
+
+YouTube, Instagram and X share the [yt-dlp implementation](../packages/adapters/src/sources/yt-dlp.ts). Their accepted URLs and extractors are separate entries in [the site registry](../packages/adapters/src/source-registry.ts). Edit the policy there when a site's URL format changes. To replace the downloader for a named source in an embedding application, pass a `SourceAdapter` in `new NodeSources({ files, overrides: { instagram: myAdapter } })`. An explicitly submitted `yt_dlp` source uses its own registry entry point.
 
 ## Persistence and recovery
 

@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   process: vi.fn(),
   auth: vi.fn(),
 }));
-vi.mock('../src/media.js', () => ({ runCommand: mocks.command }));
+vi.mock('../src/run-command.js', () => ({ runCommand: mocks.command }));
 vi.mock('../src/codex-audio.js', () => ({
   transcribeCodexAudio: mocks.transcribe,
 }));

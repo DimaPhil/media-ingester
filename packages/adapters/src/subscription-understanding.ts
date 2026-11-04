@@ -10,7 +10,7 @@ import {
   type ChunkOutput,
 } from '@media-ingest/sdk';
 import { transcribeCodexAudio, type CodexAudioOptions } from './codex-audio.js';
-import { runCommand } from './media.js';
+import { runCommand } from './run-command.js';
 import {
   runSubscriptionProcess,
   subscriptionEnvironment,

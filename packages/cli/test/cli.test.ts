@@ -9,7 +9,7 @@ import {
   operations,
   RELEASE_VERSION,
 } from '@media-ingest/contracts';
-import { createProgram } from '../src/cli.js';
+import { createProgram, inferSource } from '../src/cli.js';
 import { complete, completionScript } from '../src/completion.js';
 import { configPath, loadConfig, saveConfig } from '../src/config.js';
 
@@ -37,6 +37,28 @@ async function runner(stdin = '') {
   };
 }
 describe('CLI contract', () => {
+  it.each([
+    ['https://t.me/channel/17', 'telegram'],
+    ['https://telegram.me/c/123/4/17', 'telegram'],
+    ['tg://chat/-100123/17', 'telegram'],
+    ['https://t.me/+invite', 'telegram'],
+    ['https://m.youtube.com/watch?v=a', 'youtube'],
+    ['https://youtu.be/a', 'youtube'],
+    ['https://www.instagram.com/reel/a/', 'instagram'],
+    ['https://mobile.twitter.com/a/status/12', 'x'],
+    ['https://x.com/a/status/12', 'x'],
+    ['https://drive.google.com/file/d/a/view', 'google_drive'],
+    ['https://docs.google.com/document/d/a/edit', 'google_drive'],
+    ['https://t.me.example.com/a/17', 'http'],
+    ['https://t.me@elsewhere.example/a/17', 'http'],
+    ['./t.me/channel/17', 'local_file'],
+  ])('infers the adapter for %s', (uri, kind) => {
+    expect(inferSource(uri)).toEqual({ kind, uri });
+  });
+  it('honors an explicit source kind', () => {
+    const uri = 'https://www.instagram.com/reel/a/';
+    expect(inferSource(uri, 'yt_dlp')).toEqual({ kind: 'yt_dlp', uri });
+  });
   it('prints usable help and rejects unknown commands', async () => {
     const cli = await runner();
     await expect(cli.run(['--help'])).rejects.toMatchObject({ code: 'commander.helpDisplayed' });

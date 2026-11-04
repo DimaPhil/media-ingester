@@ -72,6 +72,15 @@ describe('source network policies', () => {
     expect(() => driveId('https://drive.google.com/drive/folders/abc')).toThrow();
     expect(telegramReference('https://t.me/channel/12')).toEqual({ chat: '@channel', message: 12 });
     expect(telegramReference('https://t.me/c/123/14')).toEqual({ chat: '-100123', message: 14 });
+    expect(telegramReference('tg://chat/-100123/14')).toEqual({ chat: '-100123', message: 14 });
+    expect(telegramReference('tg://chat/123456/42')).toEqual({ chat: '123456', message: 42 });
+    for (const uri of [
+      'tg://chat/@user/42',
+      'tg://chat/123/0',
+      'tg://chat/123/42?foo=1',
+      'tg://chat/123/99999999999999999999',
+    ])
+      expect(() => telegramReference(uri)).toThrow();
     expect(telegramReference('https://t.me/c/123/456/789')).toEqual({
       chat: '-100123',
       message: 789,

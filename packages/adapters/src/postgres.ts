@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import type { Sql, TransactionSql } from 'postgres';
 import type { JobView, MediaResult } from '@media-ingest/contracts';
 import { LeaseLostError, MediaError } from '@media-ingest/sdk';
@@ -170,7 +171,7 @@ export class PostgresJobRepository implements JobRepository {
       if (job.sourceFingerprint !== null && job.sourceFingerprint !== sourceFingerprint) {
         throw new MediaError('source_changed', 'Source changed since the previous attempt');
       }
-      if (job.plan !== null && JSON.stringify(job.plan) !== JSON.stringify(plan)) {
+      if (job.plan !== null && !isDeepStrictEqual(job.plan, plan)) {
         throw new MediaError('plan_changed', 'Chunk plan changed since the previous attempt');
       }
       job.plan = plan;

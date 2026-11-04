@@ -113,6 +113,49 @@ describe('SDK execution', () => {
     expect(onProcessingError).toHaveBeenCalledWith(job.id, expect.any(Error));
     expect((await sdk.get('alice', job.id)).status).toBe('failed');
   });
+
+  it('records the causal provider failure after a lower-index sibling rejects on cancellation', async () => {
+    const cause = new MediaError('provider_rejected', 'Provider rejected the media', false);
+    const onProcessingError = vi.fn();
+    const base = fixture();
+    let started!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const process = vi
+      .fn<SdkOptions['provider']['process']>()
+      .mockImplementationOnce(
+        (_artifact, _request, { signal }) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => reject(new DOMException('Canceled sibling', 'AbortError')),
+              { once: true },
+            );
+            started();
+          }),
+      )
+      .mockImplementationOnce(async () => {
+        await firstStarted;
+        throw cause;
+      });
+    const sdk = new MediaSdk({
+      sources: base.sources,
+      media: base.media,
+      provider: { ...base.provider, process },
+      chunkConcurrency: 2,
+      onProcessingError,
+    });
+    const job = await sdk.submit('alice', request);
+    await sdk.runNext();
+    expect(onProcessingError).toHaveBeenCalledWith(job.id, cause);
+    expect((await sdk.get('alice', job.id)).error).toEqual({
+      code: 'provider_rejected',
+      message: 'Provider rejected the media',
+      retryable: false,
+    });
+    expect(base.media.cleanup).toHaveBeenCalledOnce();
+  });
   it('pins model, processes ordered chunks, offsets timestamps and strips internal persistence data', async () => {
     const { sdk, provider, media } = fixture();
     const job = await sdk.submit('alice', request);
@@ -290,6 +333,13 @@ describe('repository concurrency and fencing', () => {
     const second = (await repository.claim(time, 100))!;
     expect(second.job.chunks['0']).toEqual(output);
     expect(second.token).not.toBe(first.token);
+    await repository.savePlan(
+      job.id,
+      second.token,
+      [{ endMs: 1000, index: 0, startMs: 0 }],
+      'hash',
+      time,
+    );
     await expect(repository.heartbeat(job.id, first.token, time, 100)).rejects.toBeInstanceOf(
       LeaseLostError,
     );
@@ -399,5 +449,33 @@ describe('planning and aggregation', () => {
       transcription: { provider: 'codex', protocol: 'realtime-v3', model: null },
       frameIntervalMs: 5000,
     });
+  });
+
+  it('rejects incompatible frame intervals and transcription identities across checkpoints', () => {
+    const plan = planChunks(2000, 1000);
+    const modelRequest = { ...request, model: 'test' };
+    const transcription = { provider: 'codex', protocol: 'realtime-v3', model: null } as const;
+    const first = { ...output, provenance: { frameIntervalMs: 5000, transcription } };
+    const second = { ...output, provenance: { frameIntervalMs: 1000 } };
+    expect(() => aggregate(plan, { 0: first, 1: second }, modelRequest)).toThrowError(
+      expect.objectContaining({
+        code: 'inconsistent_provenance',
+        message: expect.stringContaining('frameIntervalMs'),
+      }),
+    );
+    // A persisted checkpoint can contain an identity from an older protocol version.
+    const older = {
+      ...output,
+      provenance: { transcription: { ...transcription, protocol: 'realtime-v2' } },
+    } as unknown as ChunkOutput;
+    expect(() => aggregate(plan, { 0: first, 1: older }, modelRequest)).toThrowError(
+      expect.objectContaining({
+        code: 'inconsistent_provenance',
+        message: expect.stringContaining('transcription'),
+      }),
+    );
+    expect(
+      aggregate(plan, { 0: first, 1: structuredClone(first) }, modelRequest).provenance,
+    ).toEqual(first.provenance);
   });
 });
