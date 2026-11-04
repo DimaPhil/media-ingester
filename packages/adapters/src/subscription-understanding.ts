@@ -376,15 +376,7 @@ export async function understandSubscription(
         ...(label === null ? {} : { label }),
       })),
       provenance: {
-        ...(audio
-          ? {
-              transcription: {
-                provider: 'codex' as const,
-                protocol: 'realtime-v3' as const,
-                model: null,
-              },
-            }
-          : {}),
+        ...transcript?.provenance,
         ...(video ? { frameIntervalMs: 5000 } : {}),
       },
     };

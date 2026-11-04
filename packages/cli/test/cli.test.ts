@@ -120,6 +120,25 @@ describe('CLI contract', () => {
     });
     expect(await loadConfig(cli.env)).toMatchObject({ token: 'not-printed' });
   });
+  it('uses the saved token only for its normalized base URL', async () => {
+    const cli = await runner();
+    const env = { HOME: cli.home, MEDIA_API_URL: 'https://media.example.com/team' };
+    await saveConfig({ baseUrl: env.MEDIA_API_URL, token: 'saved' }, env);
+    expect(
+      await loadConfig({ ...env, MEDIA_API_URL: 'https://MEDIA.example.com:443/team/' }),
+    ).toEqual({
+      baseUrl: env.MEDIA_API_URL,
+      token: 'saved',
+    });
+    for (const url of ['https://other.example.com/team', 'https://media.example.com/other']) {
+      const override = { ...env, MEDIA_API_URL: url };
+      await expect(loadConfig(override)).rejects.toThrow('MEDIA_API_TOKEN');
+      expect(await loadConfig({ ...override, MEDIA_API_TOKEN: 'explicit' })).toEqual({
+        baseUrl: url,
+        token: 'explicit',
+      });
+    }
+  });
   it('fails clearly for missing or corrupted configuration', async () => {
     const cli = await runner();
     await expect(loadConfig({ HOME: cli.home })).rejects.toThrow('MEDIA_API_URL');

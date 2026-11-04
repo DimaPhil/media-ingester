@@ -162,12 +162,7 @@ export class NodeProviders implements ProviderAdapter {
       const options = this.subscriptionOptions();
       if (request.kind === 'transcription') {
         this.resolveModel(request);
-        return {
-          ...(await transcribeCodexAudio(artifact, context, options)),
-          provenance: {
-            transcription: { provider: 'codex', protocol: 'realtime-v3', model: null },
-          },
-        };
+        return transcribeCodexAudio(artifact, context, options);
       }
       return understandSubscription(artifact, request, context, options);
     }

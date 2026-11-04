@@ -29,7 +29,14 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     throw new Error(
       'Set MEDIA_API_URL and MEDIA_API_TOKEN, or run media setup --url <URL> --token-stdin',
     );
-  return { baseUrl: validateBaseUrl(baseUrl), token };
+  const normalizedUrl = validateBaseUrl(baseUrl);
+  if (
+    env.MEDIA_API_URL !== undefined &&
+    env.MEDIA_API_TOKEN === undefined &&
+    (typeof saved.baseUrl !== 'string' || normalizedUrl !== validateBaseUrl(saved.baseUrl))
+  )
+    throw new Error('Set MEDIA_API_TOKEN when overriding the saved API URL');
+  return { baseUrl: normalizedUrl, token };
 }
 export async function saveConfig(
   config: CliConfig,

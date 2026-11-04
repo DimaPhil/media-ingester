@@ -11,6 +11,7 @@ This is the short entry point for work on the rewritten service. Source and curr
 - Native subscription providers are explicitly selected. `codex` supports transcription and understanding; `claude-code` supports understanding only. Neither subscription path may silently use a paid API, including for translation.
 - Subscription understanding prepares timestamped frames and, when audio exists, a Codex realtime transcript before starting Codex or Claude. Both are supplied in the initial agent context. Silent video uses frames without ASR. Claude is not labeled as the transcription provider.
 - Use dedicated persistent writable CLI credential homes and native login. Do not copy a host's agent home or bake credentials into images. Remove inherited API-key overrides; no private credential parsing or direct token reuse.
+- Exactly silent decoded audio skips subscription ASR. Check for all-zero samples before attributing a transcript to Codex. Missing ASR output on nonzero audio remains an error.
 
 ```mermaid
 flowchart LR
@@ -41,6 +42,8 @@ flowchart LR
 | Release and dependency enforcement               | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`         |
 
 ## Checks and operating constraints
+
+The CLI binds saved credentials to the normalized API URL. Supply an explicit token when overriding it with a different endpoint. Both destructive PostgreSQL suites verify the connected database name before migrations. PostgreSQL workers use database time after acquiring the row lock and check expiry again on write.
 
 Run `pnpm check` with ffmpeg and a disposable PostgreSQL database. Use `compose.test.yml` and `TEST_DATABASE_URL`; tests reset `media_v1` and must not target live data. The gate includes typecheck, oxlint/oxfmt, dependency/release boundaries, coverage, HTTP/CLI/MCP/PostgreSQL E2E and offline CLI installation. Build Docker after changing runtime tools or authentication storage. Paid provider calls are not part of deterministic tests.
 

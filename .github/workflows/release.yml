@@ -4,6 +4,9 @@ on:
     tags: ['v*']
 permissions:
   contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   release:
     runs-on: ubuntu-24.04
@@ -41,6 +44,14 @@ jobs:
       - name: Publish complete release set
         run: |
           version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" --draft --title "Media Ingest $version" --notes "API image, CLI and libraries built and verified from $GITHUB_SHA. See release.json and SHA256SUMS."
-          gh release upload "$GITHUB_REF_NAME" "release/$version/"*
+          notes="API image, CLI and libraries built and verified from $GITHUB_SHA. See release.json and SHA256SUMS."
+          if existing=$(gh release view "$GITHUB_REF_NAME" --json isDraft,body); then
+            jq -e --arg notes "$notes" '.isDraft and .body == $notes' <<<"$existing" >/dev/null || {
+              echo "Refusing to replace a published release or a draft from a different build." >&2
+              exit 1
+            }
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Media Ingest $version" --notes "$notes"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "release/$version/"* --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false

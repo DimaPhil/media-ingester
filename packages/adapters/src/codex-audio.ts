@@ -90,11 +90,55 @@ export async function transcribeCodexAudio(
       'subscription_configuration',
       'Codex audio requires absolute local media and dedicated credential home paths',
     );
-  return withCredentialLock(options.codexHome, context.signal, async () => {
-    const workspace = await mkdtemp(join(tmpdir(), 'media-codex-audio-'));
-    try {
-      const env = subscriptionEnvironment('codex', options.codexHome, workspace);
-      const codex = options.codexPath ?? 'codex';
+  const workspace = await mkdtemp(join(tmpdir(), 'media-codex-audio-'));
+  try {
+    const env = subscriptionEnvironment('codex', options.codexHome, workspace);
+    const codex = options.codexPath ?? 'codex';
+    const probe = await runSubscriptionProcess(
+      options.ffprobePath ?? 'ffprobe',
+      [
+        '-v',
+        'error',
+        ...inputPolicy,
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'json',
+        artifact.uri,
+      ],
+      { cwd: workspace, env, signal: context.signal, timeoutMs: 10_000 },
+    );
+    const durationMs = Math.ceil(Number(JSON.parse(probe.stdout).format?.duration) * 1000);
+    if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 60_000)
+      throw new MediaError(
+        'invalid_media',
+        'Codex audio requires a clip between 1 and 60000 milliseconds',
+      );
+    // A cumulative digital peak of negative infinity means every decoded sample is exactly zero.
+    // Quiet speech, including a single nonzero PCM sample, must still go through ASR.
+    const stats = await runSubscriptionProcess(
+      options.ffmpegPath ?? 'ffmpeg',
+      [
+        '-nostdin',
+        '-v',
+        'error',
+        ...inputPolicy,
+        '-i',
+        artifact.uri,
+        '-map',
+        '0:a:0',
+        '-af',
+        'astats=metadata=1:reset=0:measure_perchannel=none:measure_overall=Peak_level,ametadata=mode=print:key=lavfi.astats.Overall.Peak_level:file=-',
+        '-f',
+        'null',
+        '-',
+      ],
+      { cwd: workspace, env, signal: context.signal, timeoutMs: 10_000 },
+    );
+    const peaks = [...stats.stdout.matchAll(/^lavfi\.astats\.Overall\.Peak_level=(.+)$/gm)];
+    if (peaks.length && peaks.every((match) => match[1]?.trim() === '-inf'))
+      return { text: '', segments: [], timeRanges: [], detectedLanguage: null };
+    return await withCredentialLock(options.codexHome, context.signal, async () => {
       const version = await runSubscriptionProcess(codex, ['--version'], {
         cwd: workspace,
         env,
@@ -106,31 +150,15 @@ export async function transcribeCodexAudio(
           'subscription_configuration',
           'Experimental audio requires codex-cli 0.163.0',
         );
-      const probe = await runSubscriptionProcess(
-        options.ffprobePath ?? 'ffprobe',
-        [
-          '-v',
-          'error',
-          ...inputPolicy,
-          '-show_entries',
-          'format=duration',
-          '-of',
-          'json',
-          artifact.uri,
-        ],
-        { cwd: workspace, env, signal: context.signal, timeoutMs: 10_000 },
-      );
-      const durationMs = Math.ceil(Number(JSON.parse(probe.stdout).format?.duration) * 1000);
-      if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 60_000)
-        throw new MediaError(
-          'invalid_media',
-          'Codex audio requires a clip between 1 and 60000 milliseconds',
-        );
-      return await streamAudio(artifact, context, options, workspace, env, durationMs);
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
-  });
+      const output = await streamAudio(artifact, context, options, workspace, env, durationMs);
+      return {
+        ...output,
+        provenance: { transcription: { provider: 'codex', protocol: 'realtime-v3', model: null } },
+      };
+    });
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 }
 
 async function streamAudio(

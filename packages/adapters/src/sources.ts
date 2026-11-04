@@ -58,12 +58,11 @@ export function telegramReference(uri: string): { chat: string; message: number 
     url.password
   )
     throw new MediaError('invalid_input', 'Invalid Telegram URL');
-  const parts = url.pathname.split('/').filter(Boolean);
-  const privatePost = parts[0] === 'c';
-  const chat = privatePost ? `-100${parts[1]}` : `@${parts[0]}`;
-  const message = Number(parts[privatePost ? 2 : 1]);
-  if (!Number.isSafeInteger(message) || message < 1 || !/^(@[\w]+|-100\d+)$/.test(chat))
+  const post = /^\/(?:(?:c\/(\d+))|([\w]+))(?:\/[1-9]\d*)?\/([1-9]\d*)\/?$/.exec(url.pathname);
+  const message = Number(post?.[3]);
+  if (!post || post[2] === 'c' || !Number.isSafeInteger(message) || url.searchParams.has('comment'))
     throw new MediaError('invalid_input', 'Expected a single Telegram post');
+  const chat = post[1] ? `-100${post[1]}` : `@${post[2]}`;
   return { chat, message };
 }
 export async function googleAccessToken(credentials?: Record<string, unknown>): Promise<string> {

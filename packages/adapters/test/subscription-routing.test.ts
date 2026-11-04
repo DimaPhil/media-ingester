@@ -62,7 +62,10 @@ describe('subscription provider dispatch', () => {
     expect(provider.chunkDurationMs(request)).toBe(60000);
   });
   it('uses only native ASR and records unknown underlying model honestly', async () => {
-    vi.mocked(transcribeCodexAudio).mockResolvedValue(output);
+    vi.mocked(transcribeCodexAudio).mockResolvedValue({
+      ...output,
+      provenance: { transcription: { provider: 'codex', protocol: 'realtime-v3', model: null } },
+    });
     const provider = new NodeProviders({
       subscription,
       openaiApiKey: 'unused',
@@ -74,6 +77,8 @@ describe('subscription provider dispatch', () => {
       provenance: { transcription: { provider: 'codex', protocol: 'realtime-v3', model: null } },
     });
     expect(transcribeCodexAudio).toHaveBeenCalledWith(artifact, context, subscription);
+    vi.mocked(transcribeCodexAudio).mockResolvedValue({ ...output, text: '' });
+    expect((await provider.process(artifact, request, context)).provenance).toBeUndefined();
     vi.mocked(transcribeCodexAudio).mockRejectedValue(new Error('Native auth required'));
     await expect(provider.process(artifact, request, context)).rejects.toThrow(
       'Native auth required',

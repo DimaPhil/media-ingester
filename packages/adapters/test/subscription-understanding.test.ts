@@ -57,6 +57,7 @@ beforeEach(() => {
     segments: [{ startMs: 0, endMs: 1000, text: 'Full spoken words' }],
     timeRanges: [],
     detectedLanguage: 'en',
+    provenance: { transcription: { provider: 'codex', protocol: 'realtime-v3', model: null } },
   });
   mocks.process.mockImplementation(async (_binary, args) => {
     if (args.includes('-o')) await writeFile(args[args.indexOf('-o') + 1], JSON.stringify(output));
@@ -141,6 +142,19 @@ describe('subscription understanding', () => {
     expect(args).toContain('features.shell_tool=false');
     expect(args).toContain('chosen-model');
     expect(result.provenance?.transcription?.model).toBeNull();
+  });
+  it('omits transcription provenance when a video audio track contains only zero samples', async () => {
+    mocks.transcribe.mockResolvedValue({
+      text: '',
+      segments: [],
+      timeRanges: [],
+      detectedLanguage: null,
+    });
+    const result = await understandSubscription(artifact, request, context, options);
+    expect(result.provenance).toEqual({ frameIntervalMs: 5000 });
+    expect(mocks.process.mock.calls[0]![2].input).toContain(
+      'Complete audio transcript: {"text":"","segments":[]}',
+    );
   });
   it('skips ASR for silent video and uses native Claude initial image blocks', async () => {
     mocks.command.mockImplementation(async (_binary, args) => {

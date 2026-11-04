@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { JobRecord } from '@media-ingest/sdk';
 import { LeaseLostError } from '@media-ingest/sdk';
 import { applyMigrations, PostgresAuthStore, PostgresJobRepository } from '../src/postgres.js';
-import { requireDisposableDatabase } from '../../../test/support/database.js';
+import {
+  requireDisposableDatabase,
+  verifyDisposableDatabase,
+} from '../../../test/support/database.js';
 
 const url = process.env.TEST_DATABASE_URL;
 if (url) requireDisposableDatabase(url);
@@ -13,6 +16,7 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
   const repository = new PostgresJobRepository(sql);
   const prefix = `test-${randomUUID()}`;
   const owners: string[] = [];
+  let verified = false;
   function job(idempotencyKey?: string): JobRecord {
     const ownerId = `${prefix}-${randomUUID()}`;
     owners.push(ownerId);
@@ -42,11 +46,14 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
     };
   }
   beforeAll(async () => {
+    await verifyDisposableDatabase(sql, url!);
+    verified = true;
     // TEST_DATABASE_URL must point to a disposable database. Queue-wide claims require isolation.
     await Promise.all([applyMigrations(sql), applyMigrations(sql)]);
     await sql`TRUNCATE media_v1.jobs, media_v1.auth_entries`;
   });
   afterAll(async () => {
+    if (!verified) return sql.end();
     for (const owner of owners) await sql`DELETE FROM media_v1.jobs WHERE owner_id=${owner}`;
     await sql`DELETE FROM media_v1.auth_entries WHERE key LIKE ${prefix + '%'}`;
     await sql.end();
@@ -70,28 +77,33 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
   });
 
   it('claims once and fences an expired worker after another worker reclaims', async () => {
+    let now = 1000;
+    const workers = new PostgresJobRepository(sql, () => now);
     const pending = await repository.enqueue(job());
-    const claims = await Promise.all([repository.claim(1000, 100), repository.claim(1000, 100)]);
+    const claims = await Promise.all([workers.claim(now, 100), workers.claim(now, 100)]);
     const lease = claims.find((value) => value !== null)!;
     expect(claims.filter(Boolean)).toHaveLength(1);
     expect(lease.job.id).toBe(pending.id);
-    await repository.heartbeat(pending.id, lease.token, 1050, 100);
-    expect(await repository.claim(1100, 100)).toBeNull();
-    const replacement = (await repository.claim(1150, 100))!;
+    now = 1050;
+    await workers.heartbeat(pending.id, lease.token, now, 100);
+    now = 1100;
+    expect(await workers.claim(now, 100)).toBeNull();
+    now = 1150;
+    const replacement = (await workers.claim(now, 100))!;
     expect(replacement.token).not.toBe(lease.token);
     expect(replacement.job.attempt).toBe(2);
-    await expect(repository.heartbeat(pending.id, lease.token, 1151, 100)).rejects.toBeInstanceOf(
+    await expect(workers.heartbeat(pending.id, lease.token, now, 100)).rejects.toBeInstanceOf(
       LeaseLostError,
     );
     await expect(
-      repository.fail(
+      workers.fail(
         pending.id,
         lease.token,
         { code: 'stale', message: 'stale', retryable: true },
         1151,
       ),
     ).rejects.toBeInstanceOf(LeaseLostError);
-    await repository.fail(
+    await workers.fail(
       pending.id,
       replacement.token,
       { code: 'test', message: 'test', retryable: true },
@@ -99,9 +111,56 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
     );
   });
 
+  it.each(['heartbeat', 'checkpoint'] as const)(
+    'rejects a %s delayed past expiry by a row lock',
+    async (action) => {
+      let now = 4000;
+      const workers = new PostgresJobRepository(sql, () => now);
+      const pending = await workers.enqueue(job());
+      const lease = (await workers.claim(now, 100))!;
+      let outcome: Promise<void | Error>;
+      await sql.begin(async (blocker) => {
+        const [row] = await blocker<
+          { pid: number }[]
+        >`SELECT pg_backend_pid() AS pid FROM media_v1.jobs WHERE id=${pending.id} FOR UPDATE`;
+        const request =
+          action === 'heartbeat'
+            ? workers.heartbeat(pending.id, lease.token, now, 100)
+            : workers.savePlan(
+                pending.id,
+                lease.token,
+                [{ index: 0, startMs: 0, endMs: 1 }],
+                'bytes',
+                now,
+              );
+        outcome = request.catch((error: Error) => error);
+        await vi.waitFor(async () => {
+          const [state] = await sql<{ blocked: boolean }[]>`SELECT EXISTS(
+          SELECT FROM pg_stat_activity WHERE ${row!.pid} = ANY(pg_blocking_pids(pid))
+        ) AS blocked`;
+          expect(state!.blocked).toBe(true);
+        });
+        // The request already reached PostgreSQL. Advance past its lease before COMMIT releases the lock.
+        now = 4120;
+      });
+      expect(await outcome!).toBeInstanceOf(LeaseLostError);
+      const expired = await workers.get(pending.ownerId, pending.id);
+      expect(expired?.leaseExpiresAt).toBe(4100);
+      expect(expired?.plan).toBeNull();
+      const fresh = (await workers.claim(now, 100))!;
+      expect(fresh.token).not.toBe(lease.token);
+      await workers.fail(
+        pending.id,
+        fresh.token,
+        { code: 'test', message: 'test', retryable: true },
+        now,
+      );
+    },
+  );
+
   it('retains completed chunks through failure, retry and finalization', async () => {
     const pending = await repository.enqueue(job());
-    const lease = (await repository.claim(2000, 100))!;
+    const lease = (await repository.claim(2000, 60_000))!;
     const plan = [
       { index: 0, startMs: 0, endMs: 1000 },
       { index: 1, startMs: 1000, endMs: 2000 },
@@ -121,7 +180,7 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
       code: 'not_found',
     });
     await repository.retry(pending.ownerId, pending.id, 2005);
-    const retry = (await repository.claim(2006, 100))!;
+    const retry = (await repository.claim(2006, 60_000))!;
     expect(retry.job.chunks['0']).toEqual(output);
     await expect(
       repository.savePlan(pending.id, retry.token, plan, 'sha256:changed', 2007),

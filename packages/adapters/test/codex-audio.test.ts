@@ -206,19 +206,23 @@ describe('Codex realtime lifecycle', () => {
     children[1].emit('exit', 0);
     await vi.advanceTimersByTimeAsync(5100);
     vi.useRealTimers();
-    expect((await pending).text).toBe('Hello');
+    expect(await pending).toMatchObject({
+      text: 'Hello',
+      provenance: { transcription: { provider: 'codex', protocol: 'realtime-v3', model: null } },
+    });
     expect(children.every((child) => child.kill.mock.calls.length === 1)).toBe(true);
   });
   it('rejects incompatible versions and oversized clips before network setup', async () => {
     fixture();
-    mocks.run.mockResolvedValueOnce({ stdout: 'codex-cli 9.0.0', stderr: '' });
+    mocks.run
+      .mockResolvedValueOnce({ stdout: '{"format":{"duration":"1"}}', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'lavfi.astats.Overall.Peak_level=-90.3', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'codex-cli 9.0.0', stderr: '' });
     await expect(
       transcribeCodexAudio(artifact, { signal: new AbortController().signal } as any, options),
     ).rejects.toThrow('0.163.0');
     expect(mocks.spawn).not.toHaveBeenCalled();
-    mocks.run
-      .mockResolvedValueOnce({ stdout: 'codex-cli 0.163.0', stderr: '' })
-      .mockResolvedValueOnce({ stdout: '{"format":{"duration":"61"}}', stderr: '' });
+    mocks.run.mockResolvedValueOnce({ stdout: '{"format":{"duration":"61"}}', stderr: '' });
     await expect(
       transcribeCodexAudio(artifact, { signal: new AbortController().signal } as any, options),
     ).rejects.toThrow('60000');

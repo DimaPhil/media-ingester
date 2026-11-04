@@ -36,14 +36,38 @@ function data(rows: JobRow[]): JobRecord | null {
   return rows[0]?.data ?? null;
 }
 
-async function writeJob(sql: Db, job: JobRecord): Promise<void> {
-  await sql`UPDATE media_v1.jobs SET status=${job.status}, lease_token=${job.leaseToken},
-    lease_expires_at=${job.leaseExpiresAt}, data=${sql.json(JSON.parse(JSON.stringify(job)))} WHERE id=${job.id}`;
+// clock_timestamp() advances while waiting for locks. PostgreSQL now() is fixed at BEGIN.
+function clockExpression(sql: Db, clock?: () => number) {
+  return clock
+    ? sql`${clock()}::bigint`
+    : sql`floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint`;
+}
+
+async function readClock(sql: Db, clock?: () => number): Promise<number> {
+  const [row] = await sql<{ ms: string }[]>`SELECT ${clockExpression(sql, clock)} AS ms`;
+  return Number(row!.ms);
+}
+
+async function writeJob(
+  sql: Db,
+  job: JobRecord,
+  fence?: { token: string; clock?: () => number },
+): Promise<void> {
+  const guard = fence
+    ? sql`AND lease_token=${fence.token} AND lease_expires_at > ${clockExpression(sql, fence.clock)}`
+    : sql``;
+  const result =
+    await sql`UPDATE media_v1.jobs SET status=${job.status}, lease_token=${job.leaseToken},
+    lease_expires_at=${job.leaseExpiresAt}, data=${sql.json(JSON.parse(JSON.stringify(job)))} WHERE id=${job.id} ${guard}`;
+  if (fence && !result.count) throw new LeaseLostError();
 }
 
 /** Row locks serialize checkpoints, while lease tokens fence out superseded workers. */
 export class PostgresJobRepository implements JobRepository {
-  constructor(private readonly sql: Sql) {}
+  constructor(
+    private readonly sql: Sql,
+    private readonly clock?: () => number,
+  ) {}
 
   async enqueue(job: JobRecord): Promise<JobRecord> {
     return this.sql.begin(async (transaction) => {
@@ -87,14 +111,15 @@ export class PostgresJobRepository implements JobRepository {
     return rows.map((row) => row.data);
   }
 
-  async claim(now: number, leaseMs: number): Promise<Lease | null> {
+  async claim(_now: number, leaseMs: number): Promise<Lease | null> {
     return this.sql.begin(async (transaction) => {
       const job = data(
         await transaction<JobRow[]>`SELECT data FROM media_v1.jobs
-        WHERE status='queued' OR (status='running' AND lease_expires_at <= ${now})
+        WHERE status='queued' OR (status='running' AND lease_expires_at <= ${clockExpression(transaction, this.clock)})
         ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1`,
       );
       if (!job) return null;
+      const now = await readClock(transaction, this.clock);
       const token = randomUUID();
       Object.assign(job, {
         status: 'running',
@@ -112,23 +137,24 @@ export class PostgresJobRepository implements JobRepository {
   private async fenced(
     id: string,
     token: string,
-    now: number,
-    update: (job: JobRecord) => void,
+    update: (job: JobRecord, now: number) => void,
   ): Promise<void> {
     await this.sql.begin(async (transaction) => {
       const job = data(
         await transaction<JobRow[]>`SELECT data FROM media_v1.jobs
-        WHERE id=${id} AND status='running' AND lease_token=${token} AND lease_expires_at > ${now} FOR UPDATE`,
+        WHERE id=${id} AND status='running' AND lease_token=${token} FOR UPDATE`,
       );
       if (!job) throw new LeaseLostError();
-      update(job);
+      const now = await readClock(transaction, this.clock);
+      if (job.leaseExpiresAt === null || job.leaseExpiresAt <= now) throw new LeaseLostError();
+      update(job, now);
       job.updatedAt = new Date(now).toISOString();
-      await writeJob(transaction, job);
+      await writeJob(transaction, job, { token, clock: this.clock });
     });
   }
 
-  async heartbeat(id: string, token: string, now: number, leaseMs: number): Promise<void> {
-    await this.fenced(id, token, now, (job) => {
+  async heartbeat(id: string, token: string, _now: number, leaseMs: number): Promise<void> {
+    await this.fenced(id, token, (job, now) => {
       job.leaseExpiresAt = now + leaseMs;
     });
   }
@@ -138,9 +164,9 @@ export class PostgresJobRepository implements JobRepository {
     token: string,
     plan: Chunk[],
     sourceFingerprint: string,
-    now: number,
+    _now: number,
   ): Promise<void> {
-    await this.fenced(id, token, now, (job) => {
+    await this.fenced(id, token, (job) => {
       if (job.sourceFingerprint !== null && job.sourceFingerprint !== sourceFingerprint) {
         throw new MediaError('source_changed', 'Source changed since the previous attempt');
       }
@@ -158,9 +184,9 @@ export class PostgresJobRepository implements JobRepository {
     token: string,
     index: number,
     output: ChunkOutput,
-    now: number,
+    _now: number,
   ): Promise<void> {
-    await this.fenced(id, token, now, (job) => {
+    await this.fenced(id, token, (job) => {
       if (!job.plan?.some((chunk) => chunk.index === index))
         throw new MediaError('invalid_chunk', 'Chunk is absent from the saved plan');
       job.chunks[String(index)] = output;
@@ -168,8 +194,8 @@ export class PostgresJobRepository implements JobRepository {
     });
   }
 
-  async complete(id: string, token: string, result: MediaResult, now: number): Promise<void> {
-    await this.fenced(id, token, now, (job) => {
+  async complete(id: string, token: string, result: MediaResult, _now: number): Promise<void> {
+    await this.fenced(id, token, (job) => {
       if (!job.plan || job.plan.length !== Object.keys(job.chunks).length)
         throw new MediaError('incomplete_job', 'Cannot complete a job with missing chunks');
       Object.assign(job, {
@@ -186,9 +212,9 @@ export class PostgresJobRepository implements JobRepository {
     id: string,
     token: string,
     error: NonNullable<JobView['error']>,
-    now: number,
+    _now: number,
   ): Promise<void> {
-    await this.fenced(id, token, now, (job) => {
+    await this.fenced(id, token, (job) => {
       Object.assign(job, { status: 'failed', error, leaseToken: null, leaseExpiresAt: null });
     });
   }

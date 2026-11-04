@@ -15,7 +15,7 @@ import {
 } from '../../packages/adapters/src/postgres.js';
 import { NodeFiles } from '../../packages/adapters/src/files.js';
 import { jobSchema, operationIds, type JobView } from '../../packages/contracts/src/index.js';
-import { requireDisposableDatabase } from '../support/database.js';
+import { requireDisposableDatabase, verifyDisposableDatabase } from '../support/database.js';
 import {
   MediaSdk,
   type MediaAdapter,
@@ -139,6 +139,7 @@ function rpc(
 }
 
 beforeAll(async () => {
+  await verifyDisposableDatabase(sql, databaseUrl!);
   await readFile(cliPath); // Fail early if the build step was omitted.
   directory = await mkdtemp(join(tmpdir(), 'media-e2e-'));
   files = new NodeFiles({ workRoot: join(directory, 'storage') });

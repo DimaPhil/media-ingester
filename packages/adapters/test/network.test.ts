@@ -72,6 +72,16 @@ describe('source network policies', () => {
     expect(() => driveId('https://drive.google.com/drive/folders/abc')).toThrow();
     expect(telegramReference('https://t.me/channel/12')).toEqual({ chat: '@channel', message: 12 });
     expect(telegramReference('https://t.me/c/123/14')).toEqual({ chat: '-100123', message: 14 });
+    expect(telegramReference('https://t.me/c/123/456/789')).toEqual({
+      chat: '-100123',
+      message: 789,
+    });
+    expect(telegramReference('https://t.me/channel/456/789')).toEqual({
+      chat: '@channel',
+      message: 789,
+    });
+    expect(() => telegramReference('https://t.me/channel/12/not-a-message')).toThrow();
+    expect(() => telegramReference('https://t.me/channel/12?comment=34')).toThrow();
     expect(() => telegramReference('https://evil.com/channel/12')).toThrow();
     expect(() => telegramReference('https://t.me/channel/abc')).toThrow();
   });
