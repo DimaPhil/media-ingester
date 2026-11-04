@@ -94,7 +94,12 @@ describe('provider normalization', () => {
   });
 
   it('sends the video MIME type through Gemini upload and transcription generation', async () => {
-    const file = { ...(await artifact()), fileName: 'clip.mp4', mimeType: 'video/mp4' };
+    const file = {
+      ...(await artifact()),
+      fileName: 'clip.mp4',
+      mimeType: 'video/mp4',
+      durationMs: 2750,
+    };
     const fetcher = vi
       .fn()
       .mockResolvedValueOnce(
@@ -143,6 +148,8 @@ describe('provider normalization', () => {
     expect(fetcher.mock.calls[1]![1].headers['content-type']).toBe('video/mp4');
     const generated = JSON.parse(fetcher.mock.calls[2]![1].body);
     expect(generated.contents[0].parts[0].text).toContain('Transcribe in the source language');
+    expect(generated.contents[0].parts[0].text).toContain('0 <= startMs <= endMs <= 2750');
+    expect(generated.contents[0].parts[0].text).toContain('full transcript with empty segments');
     expect(generated.contents[0].parts[1].file_data).toEqual({
       mime_type: 'video/mp4',
       file_uri: 'gs://video',
@@ -187,7 +194,7 @@ describe('provider normalization', () => {
     ).rejects.toThrow('recognizer');
   });
   it('waits for Gemini file activation before generating and cleans it afterward', async () => {
-    const file = await artifact();
+    const file = { ...(await artifact()), mimeType: 'video/mp4', durationMs: 40 };
     const fetcher = vi
       .fn()
       .mockResolvedValueOnce(
@@ -218,6 +225,9 @@ describe('provider normalization', () => {
       ).text,
     ).toBe('scene');
     expect(fetcher.mock.calls[2]![0]).toContain('/v1beta/files/abc');
+    const prompt = JSON.parse(fetcher.mock.calls[3]![1].body).contents[0].parts[0].text;
+    expect(prompt).toContain('0 <= startMs <= endMs <= 40');
+    expect(prompt).toContain('single still frame or uncertain timing');
   });
   it('validates output and preserves millisecond offsets', () => {
     expect(

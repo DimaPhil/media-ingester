@@ -119,14 +119,18 @@ export class GeminiProvider extends ApiProvider {
       if (file.state !== 'ACTIVE' || !file.uri) throw new Error('Gemini media processing failed');
       const prompt =
         request.kind === 'transcription'
-          ? `Transcribe in the source language. ${request.inputLanguage ? `Expected language: ${request.inputLanguage}.` : ''} Return JSON {"text":string,"detectedLanguage":string|null,"segments":[{"startMs":number,"endMs":number,"text":string,"speaker"?:string}]}. Times are relative to this clip.`
-          : `${request.prompt}\nReturn JSON {"text":string,"timeRanges":[{"startMs":number,"endMs":number,"label"?:string}]}. Times are relative to this clip.`;
+          ? `Transcribe in the source language. ${request.inputLanguage ? `Expected language: ${request.inputLanguage}.` : ''} Return JSON {"text":string,"detectedLanguage":string|null,"segments":[{"startMs":number,"endMs":number,"text":string,"speaker"?:string}]}. If segment timing is uncertain, return the full transcript with empty segments.`
+          : `${request.prompt}\nReturn JSON {"text":string,"timeRanges":[{"startMs":number,"endMs":number,"label"?:string}]}. For a single still frame or uncertain timing, return the description with empty timeRanges.`;
+      const timing = `Use integer milliseconds relative to the start of this clip. Every interval must satisfy 0 <= startMs <= endMs${artifact.durationMs === undefined ? '' : ` <= ${artifact.durationMs}`}. Never guess timestamps.`;
       return parseChunk(
         parseModelJson(
           await generateGemini(
             model,
             apiKey,
-            [{ text: prompt }, { file_data: { mime_type: mimeType, file_uri: file.uri } }],
+            [
+              { text: `${prompt}\n${timing}` },
+              { file_data: { mime_type: mimeType, file_uri: file.uri } },
+            ],
             signal,
           ),
         ),
