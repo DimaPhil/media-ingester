@@ -7,14 +7,22 @@ The [Compose service](../docker-compose.yml) binds Media Ingest to host loopback
 | `DATABASE_URL`         | The owner's PostgreSQL or Neon connection string. Use a separate disposable database for tests.                                                                                                                                                                                                                                                      |
 | `MEDIA_PUBLIC_URL`     | The exact client-facing HTTPS origin of **Media Ingest**, including a nonstandard port if used. The server derives OAuth issuer, consent URLs and the MCP resource from it and checks the incoming Host. Configure a TLS reverse proxy to preserve that authority and forward to `127.0.0.1:4000`. Loopback HTTP is supported for local development. |
 | `MEDIA_OWNER_TOKEN`    | An operator-generated secret of at least 32 characters. Generate 32 random bytes with `openssl rand -hex 32` in a private terminal or use a password manager. Store it in the service's protected environment and configure trusted clients with the same value as their bearer token. It grants full owner access and authorizes OAuth consent.     |
-| `TELEGRAM_PROXY_URL`   | The Telegram Proxy API origin reachable **from the worker container**. For separate Compose projects on the same Ubuntu host, use its reachable tailnet address and published proxy port, typically `http://<ubuntu-tailnet-host>:4040`. A shared Docker network can instead use the proxy service name.                                             |
+| `TELEGRAM_PROXY_URL`   | The Telegram Proxy API origin reachable **from the worker container**. On the same Docker host, use the shared network configuration below and `http://telegram-proxy:4040`. On different hosts, use the proxy's HTTPS endpoint and verify container reachability.                                                                                   |
 | `TELEGRAM_PROXY_TOKEN` | The proxy operator's `API_BEARER_TOKEN` when proxy bearer authentication is enabled. Media Ingest sends it only to the configured Telegram proxy.                                                                                                                                                                                                    |
 
 ## Check the routes
 
 On Ubuntu, run `tailscale serve status` to identify which external origin forwards to Media Ingest. A raw TCP forward to the HTTP listener does not provide HTTPS. Choose a free HTTPS listener or a dedicated hostname and route it to host port 4000. For example, if port 8446 is available, `tailscale serve --bg --https=8446 http://127.0.0.1:4000` creates a tailnet-only HTTPS listener. Set `MEDIA_PUBLIC_URL` to the exact HTTPS origin it reports with no path. The MCP endpoint is the origin plus `/mcp`. Test health and OAuth discovery through that same origin.
 
-For Telegram, inspect the published port with `docker compose ps` in the **proxy** project. Get the Ubuntu tailnet IPv4 address with `tailscale ip -4`. Container loopback points to the calling container. Test a known proxy URL from the **Media Ingest** container and print only the HTTP status. A 401 confirms reachability when the proxy requires authentication.
+For Telegram on the same Docker host, start the proxy project first, then add the following non-secret settings to the Media Ingest deployment environment. The [optional Compose override](../compose.telegram.yml) attaches the API to the proxy's existing network while retaining its own default network. Set `TELEGRAM_PROXY_NETWORK` if the proxy uses a different Compose project/network name.
+
+```sh
+COMPOSE_FILE=docker-compose.yml:compose.telegram.yml
+TELEGRAM_PROXY_URL=http://telegram-proxy:4040
+# TELEGRAM_PROXY_NETWORK=telegram-proxy-api_default
+```
+
+The proxy can keep its host port bound to `127.0.0.1`. A port bound to host loopback cannot be reached through the host's tailnet IP from another bridge container; the Docker service name reaches the proxy directly on the shared network. Laptop clients use the proxy's HTTPS endpoint instead. Test reachability from the **Media Ingest** container and print only the HTTP status. A 401 confirms reachability when the proxy requires authentication.
 
 ```sh
 docker compose exec -T api node -e 'fetch(new URL("/healthz", process.env.TELEGRAM_PROXY_URL), {signal: AbortSignal.timeout(5000)}).then(r => console.log(r.status))'

@@ -1,0 +1,10 @@
+services:
+  api:
+    networks:
+      - default
+      - telegram-proxy
+
+networks:
+  telegram-proxy:
+    external: true
+    name: ${TELEGRAM_PROXY_NETWORK:-telegram-proxy-api_default}
