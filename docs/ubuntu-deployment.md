@@ -30,11 +30,17 @@ docker compose exec -T api node -e 'fetch(new URL("/healthz", process.env.TELEGR
 
 ## Refresh YouTube cookies
 
-YouTube downloads read a YouTube-only cookie jar from the media volume. Set `YT_DLP_COOKIES_PATH=/data/cookies/youtube.txt` (or the YouTube entry of `YT_DLP_AUTH_JSON`) in the deployment environment. Keep a logged-in YouTube session in the host's snap Firefox and run the [refresh script](../scripts/refresh-youtube-cookies.py) from this checkout whenever downloads start failing authentication. It reads the default profile (or the profile directory named as its only argument) read-only, keeps unexpired `youtube.com` cookies only, and replaces the jar atomically through a one-off `api` container. A failed export leaves the previous jar in place. The jar is a static export: it does not renew the browser session, so log in again in Firefox when YouTube revokes it.
+YouTube downloads read a YouTube-only cookie jar from the media volume. Set `YT_DLP_COOKIES_PATH=/data/cookies/youtube.txt` (or the YouTube entry of `YT_DLP_AUTH_JSON`) in the deployment environment. Public videos download without cookies; the jar matters for content that needs an account.
+
+YouTube rotates session cookies only inside a live browser, so a static export goes stale. Sign in on youtube.com itself (not only to the Google account) in a normal window of the host's snap Firefox on the desktop session, then quit Firefox. Prefer a secondary account. The [refresh script](../scripts/refresh-youtube-cookies.py) reads the default profile (or the profile directory named as its argument) read-only and keeps unexpired first-party `youtube.com` cookies only. With `--visit` it first opens YouTube in the desktop Firefox so the session rotates, then quits the browser if it started it; with Firefox already open it only adds a tab. Before replacing the jar atomically through a one-off `api` container, it checks the export against a login-only YouTube feed. A logged-out or failed export leaves the previous jar in place and exits non-zero.
 
 ```sh
-scripts/refresh-youtube-cookies.py
+scripts/refresh-youtube-cookies.py --visit         # refresh once
+scripts/refresh-youtube-cookies.py --install-timer # weekly systemd user timer running --visit
+systemctl --user status media-ingest-youtube-cookies.service
 ```
+
+The timer needs user lingering (`loginctl enable-linger`) and opens Firefox on the desktop session when one exists, headless otherwise. A failed run means the YouTube session was revoked: sign in again in Firefox and start the service. The script never signs in or answers account challenges.
 
 ## Configure Telegram bearer authentication
 
