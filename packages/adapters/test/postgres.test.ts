@@ -207,11 +207,16 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
   it('paginates durable history by owner and media ID without returning full outputs', async () => {
     const first = job();
     const inputs = [first, { ...job(), ownerId: first.ownerId }, job()];
-    for (const input of inputs) {
+    for (const [index, input] of inputs.entries()) {
       await repository.enqueue(input);
       const lease = (await repository.claim(0, 60_000))!;
       expect(lease.job.id).toBe(input.id);
-      const chunk = { text: 'x'.repeat(400), segments: [], timeRanges: [], detectedLanguage: null };
+      const chunk = {
+        text: (index === 0 ? 'x' : '😀').repeat(400),
+        segments: [],
+        timeRanges: [],
+        detectedLanguage: null,
+      };
       await repository.savePlan(
         input.id,
         lease.token,

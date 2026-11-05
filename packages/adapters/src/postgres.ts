@@ -5,16 +5,12 @@ import type {
   JobView,
   MediaResult,
   ProcessedMedia,
+  ProcessedMediaSummary,
   ProcessedMediaDetails,
   ListHistory,
   HistoryPage,
 } from '@media-ingest/contracts';
-import {
-  LeaseLostError,
-  MediaError,
-  makeProcessedMedia,
-  summarizeProcessedMedia,
-} from '@media-ingest/sdk';
+import { LeaseLostError, MediaError, makeProcessedMedia } from '@media-ingest/sdk';
 import type {
   Chunk,
   ChunkOutput,
@@ -152,11 +148,16 @@ export class PostgresJobRepository implements JobRepository {
         )`
       : this.sql``;
     const media = input.mediaId ? this.sql`AND media_id=${input.mediaId}` : this.sql``;
-    const rows = await this.sql<{ data: ProcessedMedia }[]>`
-      SELECT data FROM media_v1.processed_media WHERE owner_id=${ownerId} ${before} ${media}
+    const rows = await this.sql<{ data: ProcessedMediaSummary }[]>`
+      SELECT (data - 'result') || jsonb_build_object('preview',left(data #>> '{result,text}',240)) AS data
+      FROM media_v1.processed_media WHERE owner_id=${ownerId} ${before} ${media}
       ORDER BY completed_at DESC,id DESC LIMIT ${input.limit + 1}`;
     return {
-      items: rows.slice(0, input.limit).map((row) => summarizeProcessedMedia(row.data)),
+      // PostgreSQL counts characters; enforce the wire schema's UTF-16 length as well.
+      items: rows.slice(0, input.limit).map(({ data }) => ({
+        ...data,
+        preview: data.preview.slice(0, 240),
+      })),
       nextBefore: rows.length > input.limit ? rows[input.limit - 1]!.data.id : null,
     };
   }
