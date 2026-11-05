@@ -42,6 +42,8 @@ For the upload retention upgrade, stop every older API/worker instance sharing t
 
 Prepare the private service environment from [the example](../.env.example), back up the database and media volume, and configure the selected [providers](media-providers.md). Run the following in the reviewed Media Ingest checkout during deployment:
 
+For migration 003, stop every old API/worker before migrating. The migration backfills completed outputs into durable history and adds indexed terminal-job expiry. The new API requires migration 003 and starts bounded cleanup at startup, then every minute. Back up the database before enabling the 30-day cleanup policy.
+
 ```sh
 docker compose build
 docker compose run --rm api node dist/migrate.js

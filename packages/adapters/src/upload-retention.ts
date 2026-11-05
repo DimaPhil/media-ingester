@@ -77,6 +77,16 @@ export class PostgresUploadRetention {
       VALUES (${job.ownerId}, ${id}, 'pending') ON CONFLICT (owner_id, upload_id) DO NOTHING`;
   }
 
+  /** Preserve failed inputs as standalone uploads when their execution records expire. */
+  async preserveExpiredInput(tx: TransactionSql, job: JobRecord): Promise<void> {
+    if (job.request.source.kind !== 'upload') return;
+    const id = job.request.source.uri.toLowerCase();
+    await lock(tx, job.ownerId, id);
+    await tx`INSERT INTO media_v1.upload_retention (owner_id,upload_id,state)
+      VALUES (${job.ownerId},${id},'awaiting_submit')
+      ON CONFLICT (owner_id,upload_id) DO UPDATE SET state='awaiting_submit'`;
+  }
+
   async drain(limit = 32): Promise<number> {
     const candidates = await this.sql<{ owner_id: string; upload_id: string }[]>`
       SELECT owner_id, upload_id FROM media_v1.upload_retention r WHERE ${eligible(this.sql)}

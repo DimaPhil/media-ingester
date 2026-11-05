@@ -56,7 +56,13 @@ A job is acknowledged after its atomic insert. Optional idempotency keys are uni
 
 Each attempt re-materializes source bytes. Their SHA-256 fingerprint must match saved checkpoints before reuse. Chunk plans and outputs are persisted independently; aggregation orders chunks and offsets timestamps. Only failed jobs are manually retried. Completion requires all planned outputs. SDK embedding can replace any individual port or use `MemoryJobRepository` for ephemeral processing.
 
-Jobs store public fields plus owner, request hash, plan, chunk outputs and lease state. Indexed SQL columns support lookup/claims; a JSONB document holds the complete record. `auth_entries` stores expiring client/consent/code/token records; bearer/code keys are hashed and `take` is atomic. The server prunes expired auth entries hourly. Uploads live on the shared media volume under owner and deterministic content/name identifiers; stable identities make repeated local submissions idempotent.
+Jobs store public fields plus owner, request hash, plan, chunk outputs and lease state. Indexed SQL columns support lookup/claims; a JSONB document holds the complete record. Successful completion writes a separate owner-scoped `processed_media` record in the same fenced transaction. It preserves the output, media ID, request and available source/inspection metadata independently of the execution row. Migration 003 backfills existing completed outputs.
+
+Completed and failed job records expire after 30 days. An indexed, bounded janitor runs at startup and every minute; queued/running jobs stay available. A completed job can be removed only after its result is archived. Expired failed inputs remain standalone uploads. Retained outputs have no automatic expiry. See [ADR 0007](adr/0007-retained-results-and-job-expiry.md).
+
+`auth_entries` stores expiring client/consent/code/token records; bearer/code keys are hashed and `take` is atomic. The server prunes expired auth entries hourly. Uploads live on the shared media volume under owner and deterministic content/name identifiers; stable identities make repeated local submissions idempotent.
+
+The admin workspace at `/admin` has a public login shell and uses the same authenticated operation catalog for jobs, retained history, results and retry. The browser keeps the token in memory, renders stored content as text and omits credentials on source links. A content security policy restricts scripts and network requests to the service origin.
 
 ## Security and limits
 

@@ -1,5 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { jobSchema, requestSchema, type JobView, type MediaRequest } from '@media-ingest/contracts';
+import {
+  jobSchema,
+  requestSchema,
+  historyInputSchema,
+  type JobView,
+  type MediaRequest,
+  type ListHistory,
+} from '@media-ingest/contracts';
 import { MediaError } from './errors.js';
 import { MemoryJobRepository } from './memory-repository.js';
 import { JobWorker } from './worker.js';
@@ -67,6 +74,20 @@ export class MediaSdk {
 
   async retry(ownerId: string, id: string): Promise<JobView> {
     return jobSchema.parse(await this.repository.retry(ownerId, id, this.now()));
+  }
+
+  history(ownerId: string, input: ListHistory = { limit: 20 }) {
+    if (!this.repository.history)
+      throw new MediaError('unsupported_history', 'Repository does not support retained history');
+    return this.repository.history(ownerId, historyInputSchema.parse(input));
+  }
+
+  async getResult(ownerId: string, id: string) {
+    if (!this.repository.getResult)
+      throw new MediaError('unsupported_history', 'Repository does not support retained history');
+    const result = await this.repository.getResult(ownerId, id);
+    if (!result) throw new MediaError('not_found', 'Result not found');
+    return result;
   }
 
   /** Processes one durable job. Returns false when no job is claimable. */

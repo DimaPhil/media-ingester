@@ -20,7 +20,7 @@ export const contractHash = createHash('sha256')
   .digest('hex');
 
 export interface OperationDependencies {
-  sdk: Pick<MediaSdk, 'submit' | 'get' | 'list' | 'retry'>;
+  sdk: Pick<MediaSdk, 'submit' | 'get' | 'list' | 'retry' | 'history' | 'getResult'>;
   sources: SourceAdapter;
   media: Pick<MediaAdapter, 'cleanup'>;
   files: {
@@ -60,6 +60,12 @@ export function createDispatcher(options: OperationDependencies) {
         break;
       case 'retry':
         output = await options.sdk.retry(ownerId, operations.retry.input.parse(input).id);
+        break;
+      case 'history':
+        output = await options.sdk.history(ownerId, operations.history.input.parse(input));
+        break;
+      case 'result':
+        output = await options.sdk.getResult(ownerId, operations.result.input.parse(input).id);
         break;
       case 'info':
         operations.info.input.parse(input);

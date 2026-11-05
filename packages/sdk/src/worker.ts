@@ -161,6 +161,10 @@ export class JobWorker {
       );
     }
     abort.signal.throwIfAborted();
-    await this.repository.complete(job.id, token, resultSchema.parse(result), this.now());
+    await this.repository.complete(job.id, token, resultSchema.parse(result), this.now(), {
+      source,
+      inspection,
+      ...(artifact.sizeBytes === undefined ? {} : { sizeBytes: artifact.sizeBytes }),
+    });
   }
 }

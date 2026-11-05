@@ -9,6 +9,7 @@ import {
 } from '@media-ingest/sdk';
 import {
   MAX_INLINE_MEDIA_BYTES,
+  RELEASE_VERSION,
   operationIds,
   type JobView,
   type Source,
@@ -203,7 +204,7 @@ describe('application security boundary', () => {
     expect(info.headers.get('x-content-type-options')).toBe('nosniff');
     expect(info.headers.get('cache-control')).toBe('no-store');
     expect(info.headers.get('x-media-contract')).toBe(contractHash);
-    expect(await info.json()).toEqual({ version: '1.0.0', contractHash });
+    expect(await info.json()).toEqual({ version: RELEASE_VERSION, contractHash });
     expect((await request('/mcp', {}, false)).status).toBe(401);
   });
 
@@ -230,6 +231,43 @@ describe('application security boundary', () => {
 });
 
 describe('catalog-backed REST operations', () => {
+  it('exposes a public login shell while history and result data require authentication', async () => {
+    const page = await request('/admin', {}, false);
+    expect(page.status).toBe(200);
+    expect(page.headers.get('content-security-policy')).toContain("script-src 'self'");
+    expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    expect(page.headers.get('cache-control')).toBe('no-store');
+    expect(await page.text()).toContain('Owner API token');
+    expect((await request('/', {}, false)).headers.get('location')).toBe('/admin');
+    const script = await request('/admin/client.js', {}, false);
+    expect(script.status).toBe(200);
+    expect(script.headers.get('content-type')).toContain('text/javascript');
+    expect((await request('/v1/history', {}, false)).status).toBe(401);
+    expect((await request('/v1/history/' + randomUUID(), {}, false)).status).toBe(401);
+  });
+
+  it('reads durable history and results through REST, MCP and the typed HTTP client', async () => {
+    const queued = await submit();
+    await sdk.runNext();
+    const list = await request('/v1/history?limit=1');
+    const page = await list.json();
+    expect(page.items[0].id).toBe(queued.id);
+    expect(page.items[0]).not.toHaveProperty('result');
+    expect(page.items[0].preview).toBe('transcript');
+    const output = await request('/v1/history/' + queued.id);
+    expect((await output.json()).result.text).toBe('transcript');
+    const client = new MediaClient({
+      baseUrl: publicUrl,
+      token: ownerToken,
+      fetch: async (input, init) => application.app.fetch(new Request(String(input), init)),
+    });
+    expect((await client.call('history', {})).items[0]?.id).toBe(queued.id);
+    expect((await client.call('result', { id: queued.id })).fingerprint).toBe('stable');
+    const tool = await mcp('tools/call', { name: 'media_result', arguments: { id: queued.id } });
+    expect((await tool.json()).result.structuredContent.result.text).toBe('transcript');
+    expect((await request('/v1/history?before=invalid')).status).toBe(400);
+    expect((await request('/v1/history/' + randomUUID())).status).toBe(404);
+  });
   it('publishes every operation and submits/gets/lists/retries a job through common validation', async () => {
     const spec = await (await request('/openapi.json')).json();
     const ids = Object.values(spec.paths).flatMap((path) =>

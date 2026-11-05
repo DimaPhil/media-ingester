@@ -10,7 +10,7 @@ export class UploadSource extends DownloadSource {
     return this.options.files.withUpload(context.ownerId, source.uri, ({ fileName }) => ({
       source,
       fileName,
-      metadata: {},
+      metadata: { mediaId: source.uri },
     }));
   }
 

@@ -1,8 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Sql, TransactionSql } from 'postgres';
-import type { JobView, MediaResult } from '@media-ingest/contracts';
-import { LeaseLostError, MediaError } from '@media-ingest/sdk';
+import type {
+  JobView,
+  MediaResult,
+  ProcessedMedia,
+  ProcessedMediaSummary,
+  ProcessedMediaDetails,
+  ListHistory,
+  HistoryPage,
+} from '@media-ingest/contracts';
+import { LeaseLostError, MediaError, makeProcessedMedia } from '@media-ingest/sdk';
 import type {
   Chunk,
   ChunkOutput,
@@ -44,7 +52,10 @@ async function writeJob(
     : sql``;
   const result =
     await sql`UPDATE media_v1.jobs SET status=${job.status}, lease_token=${job.leaseToken},
-    lease_expires_at=${job.leaseExpiresAt}, data=${sql.json(JSON.parse(JSON.stringify(job)))} WHERE id=${job.id} ${guard}`;
+    lease_expires_at=${job.leaseExpiresAt},
+    expires_at=CASE WHEN ${job.status} IN ('completed','failed')
+      THEN COALESCE(expires_at, clock_timestamp() + interval '30 days') ELSE NULL END,
+    data=${sql.json(JSON.parse(JSON.stringify(job)))} WHERE id=${job.id} ${guard}`;
   if (fence && !result.count) throw new LeaseLostError();
 }
 
@@ -123,6 +134,34 @@ export class PostgresJobRepository implements JobRepository {
     });
   }
 
+  async getResult(ownerId: string, id: string): Promise<ProcessedMedia | null> {
+    const [row] = await this.sql<{ data: ProcessedMedia }[]>`
+      SELECT data FROM media_v1.processed_media WHERE owner_id=${ownerId} AND id=${id}`;
+    return row?.data ?? null;
+  }
+
+  async history(ownerId: string, input: ListHistory): Promise<HistoryPage> {
+    const before = input.before
+      ? this.sql`AND (completed_at,id) < (
+          SELECT completed_at,id FROM media_v1.processed_media
+          WHERE owner_id=${ownerId} AND id=${input.before}
+        )`
+      : this.sql``;
+    const media = input.mediaId ? this.sql`AND media_id=${input.mediaId}` : this.sql``;
+    const rows = await this.sql<{ data: ProcessedMediaSummary }[]>`
+      SELECT (data - 'result') || jsonb_build_object('preview',left(data #>> '{result,text}',240)) AS data
+      FROM media_v1.processed_media WHERE owner_id=${ownerId} ${before} ${media}
+      ORDER BY completed_at DESC,id DESC LIMIT ${input.limit + 1}`;
+    return {
+      // PostgreSQL counts characters; enforce the wire schema's UTF-16 length as well.
+      items: rows.slice(0, input.limit).map(({ data }) => ({
+        ...data,
+        preview: data.preview.slice(0, 240),
+      })),
+      nextBefore: rows.length > input.limit ? rows[input.limit - 1]!.data.id : null,
+    };
+  }
+
   private async fenced(
     id: string,
     token: string,
@@ -183,10 +222,21 @@ export class PostgresJobRepository implements JobRepository {
     });
   }
 
-  async complete(id: string, token: string, result: MediaResult, _now: number): Promise<void> {
-    await this.fenced(id, token, async (job, _now, transaction) => {
+  async complete(
+    id: string,
+    token: string,
+    result: MediaResult,
+    _now: number,
+    media?: ProcessedMediaDetails,
+  ): Promise<void> {
+    await this.fenced(id, token, async (job, now, transaction) => {
       if (!job.plan || job.plan.length !== Object.keys(job.chunks).length)
         throw new MediaError('incomplete_job', 'Cannot complete a job with missing chunks');
+      const record = makeProcessedMedia(job, result, now, media);
+      await transaction`INSERT INTO media_v1.processed_media
+        (id,owner_id,media_id,completed_at,data)
+        VALUES (${job.id},${job.ownerId},${record.mediaId},${record.completedAt},
+          ${transaction.json(JSON.parse(JSON.stringify(record)))})`;
       Object.assign(job, {
         status: 'completed',
         result,

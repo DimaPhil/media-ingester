@@ -4,6 +4,10 @@ import type {
   MediaResult,
   ResolvedSource,
   Source,
+  ProcessedMedia,
+  ProcessedMediaDetails,
+  ListHistory,
+  HistoryPage,
 } from '@media-ingest/contracts';
 
 export interface Chunk {
@@ -41,6 +45,8 @@ export interface JobRepository {
   enqueue(job: JobRecord): Promise<JobRecord>;
   get(ownerId: string, id: string): Promise<JobRecord | null>;
   list(ownerId: string, input: ListJobs): Promise<JobRecord[]>;
+  history?(ownerId: string, input: ListHistory): Promise<HistoryPage>;
+  getResult?(ownerId: string, id: string): Promise<ProcessedMedia | null>;
   claim(now: number, leaseMs: number): Promise<Lease | null>;
   heartbeat(id: string, token: string, now: number, leaseMs: number): Promise<void>;
   savePlan(
@@ -57,7 +63,13 @@ export interface JobRepository {
     output: ChunkOutput,
     now: number,
   ): Promise<void>;
-  complete(id: string, token: string, result: MediaResult, now: number): Promise<void>;
+  complete(
+    id: string,
+    token: string,
+    result: MediaResult,
+    now: number,
+    media?: ProcessedMediaDetails,
+  ): Promise<void>;
   fail(id: string, token: string, error: NonNullable<JobView['error']>, now: number): Promise<void>;
   retry(ownerId: string, id: string, now: number): Promise<JobRecord>;
 }
@@ -73,6 +85,7 @@ export interface Artifact {
   fileName: string;
   fingerprint: string;
   mimeType?: string;
+  sizeBytes?: number;
   /** Canonical requested clip duration, excluding container/codec padding. */
   durationMs?: number;
 }

@@ -8,6 +8,7 @@ Use [architecture](architecture.md) for invariants and class hierarchies, [accep
 - Private, single-owner service. CLI/API authentication and owner-approved MCP OAuth are mandatory. OAuth client registration alone grants no access.
 - Long-running Node/container deployment. The Vercel proposal was withdrawn. The owner will provision and attach Neon; keep database and media-volume backups separate.
 - One public operation catalog drives REST, CLI, MCP, validation and schemas. CLI media actions always call the API. SDK embedding calls the processing engine directly through replaceable ports.
+- Successful outputs and media metadata live in durable `processed_media`; terminal execution records expire after 30 days. The `/admin` workspace reads the shared history/result operations. Preserve the atomic completion/archive write and migration 003 backfill before enabling cleanup; see [ADR 0007](adr/0007-retained-results-and-job-expiry.md).
 - Native subscription providers are explicitly selected. `codex` supports transcription and understanding; `claude-code` supports understanding only. Neither subscription path may silently use a paid API, including for translation.
 - Subscription understanding prepares timestamped frames and, when audio exists, a Codex realtime transcript before starting Codex or Claude. Both are supplied in the initial agent context. Silent video uses frames without ASR. Claude is not labeled as the transcription provider.
 - Use dedicated persistent writable CLI credential homes and native login. Do not copy a host's agent home or bake credentials into images. Remove inherited API-key overrides; no private credential parsing or direct token reuse.
@@ -29,19 +30,20 @@ flowchart LR
 
 ## Where changes belong
 
-| Area                                              | Owning source                                                                                             |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Wire DTOs, provider IDs, operation catalog        | `packages/contracts/src/media.ts`, `operations.ts`, `documents.ts`                                        |
-| Durable jobs, interfaces, aggregation             | `packages/sdk/src/ports.ts`, `sdk.ts`, `worker.ts`, `chunks.ts`                                           |
-| Source registration and implementations           | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`                                      |
-| Media inspection, model routing and API providers | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                                            |
-| Subscription audio                                | `packages/adapters/src/codex-audio.ts`, `codex-realtime.ts`, `codex-app-server.ts`                        |
-| Subscription understanding and process isolation  | `packages/adapters/src/subscription-understanding.ts`, `subscription-media.ts`, `subscription-runtime.ts` |
-| Server config and composition                     | `apps/api/src/config.ts`, `main.ts`                                                                       |
-| HTTP middleware, REST/MCP and shared dispatch     | `apps/api/src/application.ts`, `rest.ts`, `mcp.ts`, `operations.ts`                                       |
-| Owner and OAuth authentication                    | `apps/api/src/auth/`                                                                                      |
-| HTTP client and distributable CLI                 | `packages/client`, `packages/cli`                                                                         |
-| Release and dependency enforcement                | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`                                  |
+| Area                                              | Owning source                                                                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Wire DTOs, provider IDs, operation catalog        | `packages/contracts/src/media.ts`, `operations.ts`, `documents.ts`                                                       |
+| Durable jobs, interfaces, aggregation             | `packages/sdk/src/ports.ts`, `sdk.ts`, `worker.ts`, `chunks.ts`                                                          |
+| Retained results, job expiry and admin UI         | `packages/sdk/src/history.ts`, `packages/adapters/src/job-retention.ts`, `apps/api/src/admin-page.ts`, `admin-client.ts` |
+| Source registration and implementations           | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`                                                     |
+| Media inspection, model routing and API providers | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                                                           |
+| Subscription audio                                | `packages/adapters/src/codex-audio.ts`, `codex-realtime.ts`, `codex-app-server.ts`                                       |
+| Subscription understanding and process isolation  | `packages/adapters/src/subscription-understanding.ts`, `subscription-media.ts`, `subscription-runtime.ts`                |
+| Server config and composition                     | `apps/api/src/config.ts`, `main.ts`                                                                                      |
+| HTTP middleware, REST/MCP and shared dispatch     | `apps/api/src/application.ts`, `rest.ts`, `mcp.ts`, `operations.ts`                                                      |
+| Owner and OAuth authentication                    | `apps/api/src/auth/`                                                                                                     |
+| HTTP client and distributable CLI                 | `packages/client`, `packages/cli`                                                                                        |
+| Release and dependency enforcement                | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`                                                 |
 
 ## Checks and operating constraints
 

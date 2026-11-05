@@ -51,6 +51,46 @@ function fixture(overrides: Partial<SdkOptions> = {}) {
 }
 
 describe('SDK execution', () => {
+  it('keeps existing repository implementations usable without history support', async () => {
+    const base = fixture();
+    const legacy = new Proxy(base.repository, {
+      get(target, key) {
+        if (key === 'history' || key === 'getResult') return undefined;
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const { sdk } = fixture({ repository: legacy });
+    const job = await sdk.submit('alice', request);
+    await sdk.runNext();
+    expect((await sdk.get('alice', job.id)).status).toBe('completed');
+    expect(() => sdk.history('alice')).toThrow('does not support retained history');
+    await expect(sdk.getResult('alice', job.id)).rejects.toThrow(
+      'does not support retained history',
+    );
+  });
+
+  it('retains owner-scoped metadata and paginates in-memory result history', async () => {
+    const { sdk } = fixture();
+    const first = await sdk.submit('alice', request);
+    await sdk.runNext();
+    await sdk.submit('alice', request);
+    await sdk.runNext();
+    const other = await sdk.submit('bob', request);
+    await sdk.runNext();
+    const page = await sdk.history('alice', { limit: 1 });
+    expect(page.items).toHaveLength(1);
+    expect(page.nextBefore).toBeTruthy();
+    expect((await sdk.history('alice', { limit: 1, before: page.nextBefore! })).items).toHaveLength(
+      1,
+    );
+    expect((await sdk.history('alice', { limit: 20, before: other.id })).items).toEqual([]);
+    expect((await sdk.history('alice', { limit: 20, mediaId: 'missing' })).items).toEqual([]);
+    const result = await sdk.getResult('alice', first.id);
+    expect(result.media?.source.fileName).toBe('input');
+    expect(result.result.text).toBeTruthy();
+    await expect(sdk.getResult('bob', first.id)).rejects.toThrow('Result not found');
+  });
   it('lets a provider select video for transcription while preserving fallback request-kind behavior', async () => {
     const base = fixture();
     const inputFormat = vi.fn(() => 'video' as const);

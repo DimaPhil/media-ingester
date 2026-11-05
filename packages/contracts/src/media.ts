@@ -111,3 +111,42 @@ export const resolvedSourceSchema = z.object({
   metadata: z.record(z.string(), z.unknown()),
 });
 export type ResolvedSource = z.infer<typeof resolvedSourceSchema>;
+
+export const processedMediaDetailsSchema = z.object({
+  source: resolvedSourceSchema,
+  sizeBytes: z.number().int().nonnegative().optional(),
+  inspection: z.object({
+    durationMs: z.number().nonnegative(),
+    hasAudio: z.boolean(),
+    hasVideo: z.boolean(),
+  }),
+});
+export type ProcessedMediaDetails = z.infer<typeof processedMediaDetailsSchema>;
+export const processedMediaSchema = z.object({
+  id: z.uuid(),
+  mediaId: z.string().min(1),
+  request: requestSchema,
+  fingerprint: z.string().nullable(),
+  media: processedMediaDetailsSchema.nullable(),
+  createdAt: z.iso.datetime(),
+  completedAt: z.iso.datetime(),
+  result: resultSchema,
+});
+export type ProcessedMedia = z.infer<typeof processedMediaSchema>;
+export const processedMediaSummarySchema = processedMediaSchema
+  .omit({ result: true })
+  .extend({ preview: z.string().max(240) });
+export type ProcessedMediaSummary = z.infer<typeof processedMediaSummarySchema>;
+export const historyInputSchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    before: z.uuid().optional(),
+    mediaId: z.string().min(1).max(4096).optional(),
+  })
+  .strict();
+export type ListHistory = z.infer<typeof historyInputSchema>;
+export const historyPageSchema = z.object({
+  items: z.array(processedMediaSummarySchema),
+  nextBefore: z.uuid().nullable(),
+});
+export type HistoryPage = z.infer<typeof historyPageSchema>;

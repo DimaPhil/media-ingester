@@ -1,12 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import type { MediaResult, JobView } from '@media-ingest/contracts';
+import type {
+  MediaResult,
+  JobView,
+  ProcessedMedia,
+  ProcessedMediaDetails,
+  ListHistory,
+  HistoryPage,
+} from '@media-ingest/contracts';
 import { LeaseLostError, MediaError } from './errors.js';
 import type { Chunk, ChunkOutput, JobRecord, JobRepository, Lease, ListJobs } from './ports.js';
+import { makeProcessedMedia, summarizeProcessedMedia } from './history.js';
 
 /** Reference implementation: mutations run synchronously before their promises resolve. */
 export class MemoryJobRepository implements JobRepository {
   private readonly jobs = new Map<string, JobRecord>();
+  private readonly results = new Map<string, { ownerId: string; record: ProcessedMedia }>();
 
   async enqueue(job: JobRecord): Promise<JobRecord> {
     if (job.idempotencyKey !== undefined) {
@@ -62,6 +71,28 @@ export class MemoryJobRepository implements JobRepository {
     return { job: structuredClone(job), token };
   }
 
+  async getResult(ownerId: string, id: string): Promise<ProcessedMedia | null> {
+    const result = this.results.get(id);
+    return result?.ownerId === ownerId ? structuredClone(result.record) : null;
+  }
+
+  async history(ownerId: string, input: ListHistory): Promise<HistoryPage> {
+    const records = [...this.results.values()]
+      .filter((entry) => entry.ownerId === ownerId)
+      .map((entry) => entry.record)
+      .sort((a, b) => b.completedAt.localeCompare(a.completedAt) || b.id.localeCompare(a.id));
+    const start = input.before ? records.findIndex((entry) => entry.id === input.before) + 1 : 0;
+    if (input.before && start === 0) return { items: [], nextBefore: null };
+    const page = records
+      .slice(start)
+      .filter((entry) => !input.mediaId || entry.mediaId === input.mediaId)
+      .slice(0, input.limit + 1);
+    return structuredClone({
+      items: page.slice(0, input.limit).map(summarizeProcessedMedia),
+      nextBefore: page.length > input.limit ? page[input.limit - 1]!.id : null,
+    });
+  }
+
   private fenced(id: string, token: string, now: number): JobRecord {
     const job = this.jobs.get(id);
     if (
@@ -113,10 +144,17 @@ export class MemoryJobRepository implements JobRepository {
     job.completedChunks = Object.keys(job.chunks).length;
   }
 
-  async complete(id: string, token: string, result: MediaResult, now: number): Promise<void> {
+  async complete(
+    id: string,
+    token: string,
+    result: MediaResult,
+    now: number,
+    media?: ProcessedMediaDetails,
+  ): Promise<void> {
     const job = this.fenced(id, token, now);
     if (!job.plan || job.completedChunks !== job.totalChunks)
       throw new MediaError('incomplete_job', 'Cannot complete a job with missing chunks');
+    const record = makeProcessedMedia(job, result, now, media);
     Object.assign(job, {
       status: 'completed',
       result: structuredClone(result),
@@ -124,6 +162,7 @@ export class MemoryJobRepository implements JobRepository {
       leaseToken: null,
       leaseExpiresAt: null,
     });
+    this.results.set(id, { ownerId: job.ownerId, record });
   }
 
   async fail(
