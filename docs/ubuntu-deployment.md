@@ -28,6 +28,14 @@ The proxy can keep its host port bound to `127.0.0.1`. A port bound to host loop
 docker compose exec -T api node -e 'fetch(new URL("/healthz", process.env.TELEGRAM_PROXY_URL), {signal: AbortSignal.timeout(5000)}).then(r => console.log(r.status))'
 ```
 
+## Refresh YouTube cookies
+
+YouTube downloads read a YouTube-only cookie jar from the media volume. Set `YT_DLP_COOKIES_PATH=/data/cookies/youtube.txt` (or the YouTube entry of `YT_DLP_AUTH_JSON`) in the deployment environment. Keep a logged-in YouTube session in the host's snap Firefox and run the [refresh script](../scripts/refresh-youtube-cookies.py) from this checkout whenever downloads start failing authentication. It reads the default profile (or the profile directory named as its only argument) read-only, keeps unexpired `youtube.com` cookies only, and replaces the jar atomically through a one-off `api` container. A failed export leaves the previous jar in place. The jar is a static export: it does not renew the browser session, so log in again in Firefox when YouTube revokes it.
+
+```sh
+scripts/refresh-youtube-cookies.py
+```
+
 ## Configure Telegram bearer authentication
 
 The proxy operator supplies a shared secret. In the proxy's protected environment, set `API_AUTH_ENABLED=true` and `API_BEARER_TOKEN` to a newly generated secret. Set the identical value in Media Ingest as `TELEGRAM_PROXY_TOKEN` and update any other proxy clients. Keep the Media Ingest owner token separate. The proxy compares bearer credentials against its configured secret. If authentication is disabled, the client can omit the token and any caller that can reach the proxy has the same unauthenticated access. See the proxy's [settings](https://github.com/DimaPhil/telegram-proxy-api/blob/13784b00ea283f7ff15745f08235bbc68d39bdb0/src/telegram_proxy_api/config.py) and [authorization check](https://github.com/DimaPhil/telegram-proxy-api/blob/13784b00ea283f7ff15745f08235bbc68d39bdb0/src/telegram_proxy_api/dependencies.py).
