@@ -4,6 +4,7 @@ import postgres from 'postgres';
 import { MediaSdk } from '@media-ingest/sdk';
 import {
   PostgresJobRepository,
+  PostgresJobRetention,
   PostgresAuthStore,
   NodeMedia,
   NodeSources,
@@ -17,8 +18,8 @@ const config = loadConfig();
 const sql = postgres(config.DATABASE_URL, { max: 10 });
 // Migrations are an explicit deployment step, never a side effect of a request or startup.
 await sql`SELECT id FROM media_v1.jobs LIMIT 0`;
-const [migration] = await sql`SELECT version FROM media_v1.migrations WHERE version = 2`;
-if (!migration) throw new Error('Apply migration 002 before starting the API');
+const [migration] = await sql`SELECT version FROM media_v1.migrations WHERE version = 3`;
+if (!migration) throw new Error('Apply migration 003 before starting the API');
 const credentials = config.GOOGLE_SERVICE_ACCOUNT_JSON
   ? (JSON.parse(config.GOOGLE_SERVICE_ACCOUNT_JSON) as Record<string, unknown>)
   : undefined;
@@ -115,6 +116,20 @@ function cleanCompletedUploads() {
 cleanCompletedUploads();
 const cleanupTimer = setInterval(cleanCompletedUploads, 5000);
 cleanupTimer.unref();
+const jobRetention = new PostgresJobRetention(sql, retention);
+let jobCleanup: Promise<unknown> | undefined;
+function expireJobs() {
+  if (jobCleanup) return;
+  jobCleanup = jobRetention
+    .drain()
+    .catch(() => console.error('Expired job cleanup failed; will retry'))
+    .finally(() => {
+      jobCleanup = undefined;
+    });
+}
+expireJobs();
+const jobCleanupTimer = setInterval(expireJobs, 60_000);
+jobCleanupTimer.unref();
 const abort = new AbortController();
 const workers = Array.from({ length: config.MEDIA_WORKERS }, async () => {
   while (!abort.signal.aborted) {
@@ -140,11 +155,13 @@ async function stop() {
   abort.abort();
   clearInterval(pruneTimer);
   clearInterval(cleanupTimer);
+  clearInterval(jobCleanupTimer);
   const deadline = setTimeout(() => process.exit(1), 30000);
   deadline.unref();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await Promise.allSettled(workers);
   await cleanup;
+  await jobCleanup;
   await application.close();
   await sql.end();
   clearTimeout(deadline);

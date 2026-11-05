@@ -41,7 +41,7 @@ export class GoogleDriveSource extends DownloadSource {
       source,
       fileName: safeName(data.name),
       ...(data.mimeType ? { mimeType: data.mimeType } : {}),
-      metadata: { id },
+      metadata: { id, mediaId: id },
     };
   }
   protected async download(

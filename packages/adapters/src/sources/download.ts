@@ -58,12 +58,13 @@ export abstract class DownloadSource<
       maxBytes,
     });
     attempt.signal.throwIfAborted();
-    if ((await stat(path)).size > maxBytes)
-      throw new Error('Media exceeds configured download limit');
-    return this.options.files.artifact(
+    const sizeBytes = (await stat(path)).size;
+    if (sizeBytes > maxBytes) throw new Error('Media exceeds configured download limit');
+    const artifact = await this.options.files.artifact(
       path,
       resolved.fileName || basename(path),
       resolved.mimeType,
     );
+    return { ...artifact, sizeBytes };
   }
 }

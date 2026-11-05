@@ -166,7 +166,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`TRUNCATE media_v1.jobs, media_v1.auth_entries, media_v1.upload_retention`;
+  await sql`TRUNCATE media_v1.jobs, media_v1.auth_entries, media_v1.upload_retention, media_v1.processed_media`;
   processed.length = 0;
   failSecondChunk = false;
 });
@@ -214,6 +214,25 @@ describe('real HTTP, CLI and durable worker', () => {
     expect(listed.items.map((item) => item.id)).toEqual([queued.id]);
     const durable = await new PostgresJobRepository(sql).get('owner', queued.id);
     expect(Object.keys(durable!.chunks)).toEqual(['0', '1']);
+    const archive = (await cliJson(['result', queued.id])) as {
+      mediaId: string;
+      result: { text: string };
+    };
+    expect(archive.result.text).toBe('chunk 0 chunk 1');
+    expect(archive.mediaId).toBeTruthy();
+    // Result reads remain available after the separate execution row has been removed.
+    await sql`DELETE FROM media_v1.jobs WHERE id=${queued.id}`;
+    expect(((await cliJson(['result', queued.id])) as typeof archive).result.text).toBe(
+      'chunk 0 chunk 1',
+    );
+    const history = (await cliJson([
+      'history',
+      '--input',
+      JSON.stringify({ mediaId: archive.mediaId }),
+    ])) as {
+      items: { id: string }[];
+    };
+    expect(history.items.map((item) => item.id)).toEqual([queued.id]);
     expect(await sdk.runNext()).toBe(false);
   });
 

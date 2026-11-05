@@ -5,9 +5,14 @@ import {
   remoteSourceSchema,
   resolvedSourceSchema,
   statusSchema,
+  historyInputSchema,
+  historyPageSchema,
+  processedMediaSchema,
+  processedMediaDetailsSchema,
+  processedMediaSummarySchema,
 } from './media.js';
 
-export const RELEASE_VERSION = '1.0.0';
+export const RELEASE_VERSION = '1.1.0';
 export const API_VERSION = 'v1';
 export const MAX_INLINE_MEDIA_BYTES = 32 * 1024 * 1024;
 const idInput = z.object({ id: z.uuid() }).strict();
@@ -16,6 +21,12 @@ const submit = z
   .object({ request: remoteRequestSchema, idempotencyKey: z.string().min(1).max(200).optional() })
   .strict();
 const remoteJobSchema = jobSchema.extend({ request: remoteRequestSchema });
+const remoteMediaFields = {
+  request: remoteRequestSchema,
+  media: processedMediaDetailsSchema
+    .extend({ source: resolvedSourceSchema.extend({ source: remoteSourceSchema }) })
+    .nullable(),
+};
 export const operations = {
   submit: {
     method: 'POST',
@@ -53,6 +64,24 @@ export const operations = {
     scope: 'media:write',
     input: idInput,
     output: remoteJobSchema,
+  },
+  history: {
+    method: 'GET',
+    path: '/v1/history',
+    description: 'List retained processing results and media metadata',
+    scope: 'media:read',
+    input: historyInputSchema,
+    output: historyPageSchema.extend({
+      items: z.array(processedMediaSummarySchema.extend(remoteMediaFields)),
+    }),
+  },
+  result: {
+    method: 'GET',
+    path: '/v1/history/:id',
+    description: 'Read a retained result by original job ID',
+    scope: 'media:read',
+    input: idInput,
+    output: processedMediaSchema.extend(remoteMediaFields),
   },
   resolve: {
     method: 'POST',

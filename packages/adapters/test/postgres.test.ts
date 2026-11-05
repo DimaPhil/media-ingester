@@ -9,6 +9,7 @@ import { LeaseLostError } from '@media-ingest/sdk';
 import { applyMigrations, PostgresAuthStore, PostgresJobRepository } from '../src/postgres.js';
 import { NodeFiles } from '../src/files.js';
 import { PostgresUploadRetention } from '../src/upload-retention.js';
+import { PostgresJobRetention } from '../src/job-retention.js';
 import {
   requireDisposableDatabase,
   verifyDisposableDatabase,
@@ -56,12 +57,15 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
     verified = true;
     // TEST_DATABASE_URL must point to a disposable database. Queue-wide claims require isolation.
     await Promise.all([applyMigrations(sql), applyMigrations(sql)]);
-    await sql`TRUNCATE media_v1.jobs, media_v1.auth_entries, media_v1.upload_retention`;
+    await sql`TRUNCATE media_v1.jobs, media_v1.auth_entries, media_v1.upload_retention, media_v1.processed_media`;
     workRoot = await mkdtemp(join(tmpdir(), 'media-retention-'));
   });
   afterAll(async () => {
     if (!verified) return sql.end();
-    for (const owner of owners) await sql`DELETE FROM media_v1.jobs WHERE owner_id=${owner}`;
+    for (const owner of owners) {
+      await sql`DELETE FROM media_v1.jobs WHERE owner_id=${owner}`;
+      await sql`DELETE FROM media_v1.processed_media WHERE owner_id=${owner}`;
+    }
     await sql`DELETE FROM media_v1.auth_entries WHERE key LIKE ${prefix + '%'}`;
     await sql`DELETE FROM media_v1.upload_retention WHERE owner_id LIKE ${prefix + '%'}`;
     if (workRoot) await rm(workRoot, { recursive: true, force: true });
@@ -83,6 +87,177 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
       0,
     );
     await sql`DELETE FROM media_v1.jobs WHERE owner_id=${first.ownerId}`;
+  });
+
+  it('backfills old completed outputs before enabling terminal expiry', async () => {
+    const legacy = job();
+    const result = {
+      kind: 'transcription',
+      provider: 'openai',
+      model: 'fixture',
+      text: 'Retain this output',
+      segments: [],
+      timeRanges: [],
+      detectedLanguage: 'en',
+    };
+    await repository.enqueue(legacy);
+    const completed = {
+      ...legacy,
+      status: 'completed',
+      result,
+      sourceFingerprint: 'legacy-content',
+    };
+    await sql`UPDATE media_v1.jobs SET status='completed',data=${sql.json(completed)}
+      WHERE id=${legacy.id}`;
+    // Exercise the real upgrade from migration 002 in this verified disposable database.
+    await sql`DROP TABLE media_v1.processed_media`;
+    await sql`ALTER TABLE media_v1.jobs DROP COLUMN expires_at`;
+    await sql`DELETE FROM media_v1.migrations WHERE version=3`;
+    await applyMigrations(sql);
+    expect(await repository.getResult(legacy.ownerId, legacy.id)).toMatchObject({
+      mediaId: 'legacy-content',
+      media: null,
+      result,
+    });
+    const [row] = await sql<{ expired: boolean }[]>`SELECT expires_at < now() AS expired
+      FROM media_v1.jobs WHERE id=${legacy.id}`;
+    expect(row?.expired).toBe(true);
+    await sql`DELETE FROM media_v1.jobs WHERE id=${legacy.id}`;
+    expect(await repository.getResult(legacy.ownerId, legacy.id)).not.toBeNull();
+  });
+
+  it('expires only terminal execution records and preserves results and failed inputs', async () => {
+    const files = new NodeFiles({ workRoot });
+    const uploads = new PostgresUploadRetention(sql, files);
+    const coordinatedFiles = new NodeFiles({ workRoot, uploadLifecycle: uploads });
+    const jobs = new PostgresJobRepository(sql, undefined, uploads);
+    const retention = new PostgresJobRetention(sql, uploads);
+    const original = job();
+    const upload = await coordinatedFiles.upload(
+      original.ownerId,
+      'recording.wav',
+      Buffer.from('keep failed input').toString('base64'),
+    );
+    original.request.source = upload.source;
+    await jobs.enqueue(original);
+    const lease = (await jobs.claim(0, 60_000))!;
+    expect(lease.job.id).toBe(original.id);
+    const chunk = { text: 'Saved words', segments: [], timeRanges: [], detectedLanguage: 'en' };
+    const result = {
+      ...chunk,
+      kind: 'transcription' as const,
+      provider: 'openai' as const,
+      model: 'fixture',
+    };
+    await jobs.savePlan(
+      original.id,
+      lease.token,
+      [{ index: 0, startMs: 0, endMs: 1000 }],
+      'content',
+      0,
+    );
+    await jobs.saveChunk(original.id, lease.token, 0, chunk, 0);
+    await jobs.complete(original.id, lease.token, result, 0, {
+      source: {
+        source: upload.source,
+        fileName: 'recording.wav',
+        mimeType: 'audio/wav',
+        metadata: { mediaId: upload.source.uri },
+      },
+      inspection: { durationMs: 1000, hasAudio: true, hasVideo: false },
+    });
+    const failed = { ...job(), ownerId: original.ownerId };
+    failed.request.source = upload.source;
+    await jobs.enqueue(failed);
+    const failedLease = (await jobs.claim(0, 60_000))!;
+    expect(failedLease.job.id).toBe(failed.id);
+    await jobs.fail(
+      failed.id,
+      failedLease.token,
+      { code: 'fixture', message: 'Failed', retryable: true },
+      0,
+    );
+    expect(await uploads.drain()).toBe(0);
+    const running = await jobs.enqueue(job());
+    const runningLease = (await jobs.claim(0, 60_000))!;
+    expect(runningLease.job.id).toBe(running.id);
+    const queued = await jobs.enqueue(job());
+    await sql`UPDATE media_v1.jobs SET expires_at=clock_timestamp()-interval '1 second'
+      WHERE id IN (${original.id},${failed.id},${running.id},${queued.id})`;
+    const counts = await Promise.all([retention.drain(), retention.drain()]);
+    expect(counts.reduce((sum, count) => sum + count, 0)).toBe(2);
+    expect(await jobs.get(original.ownerId, original.id)).toBeNull();
+    expect(await jobs.get(failed.ownerId, failed.id)).toBeNull();
+    expect((await jobs.get(running.ownerId, running.id))?.status).toBe('running');
+    expect((await jobs.get(queued.ownerId, queued.id))?.status).toBe('queued');
+    expect(await jobs.getResult(original.ownerId, original.id)).toMatchObject({
+      mediaId: upload.source.uri,
+      result,
+      media: { source: { fileName: 'recording.wav' }, inspection: { durationMs: 1000 } },
+    });
+    expect(await jobs.getResult('different-owner', original.id)).toBeNull();
+    expect((await jobs.history(original.ownerId, { limit: 20 })).items).toHaveLength(1);
+    expect(await uploads.drain()).toBe(0);
+    expect(
+      await coordinatedFiles.uploadMetadata(original.ownerId, upload.source.uri),
+    ).toBeDefined();
+    await sql`DELETE FROM media_v1.jobs WHERE id IN (${running.id},${queued.id})`;
+  });
+
+  it('paginates durable history by owner and media ID without returning full outputs', async () => {
+    const first = job();
+    const inputs = [first, { ...job(), ownerId: first.ownerId }, job()];
+    for (const input of inputs) {
+      await repository.enqueue(input);
+      const lease = (await repository.claim(0, 60_000))!;
+      expect(lease.job.id).toBe(input.id);
+      const chunk = { text: 'x'.repeat(400), segments: [], timeRanges: [], detectedLanguage: null };
+      await repository.savePlan(
+        input.id,
+        lease.token,
+        [{ index: 0, startMs: 0, endMs: 1 }],
+        'shared-content',
+        0,
+      );
+      await repository.saveChunk(input.id, lease.token, 0, chunk, 0);
+      await repository.complete(
+        input.id,
+        lease.token,
+        {
+          ...chunk,
+          kind: 'transcription',
+          provider: 'openai',
+          model: 'fixture',
+        },
+        0,
+      );
+    }
+    const firstPage = await repository.history(first.ownerId, {
+      limit: 1,
+      mediaId: 'shared-content',
+    });
+    expect(firstPage.items).toHaveLength(1);
+    expect(firstPage.items[0]?.preview).toHaveLength(240);
+    expect(firstPage.items[0]).not.toHaveProperty('result');
+    const secondPage = await repository.history(first.ownerId, {
+      limit: 1,
+      before: firstPage.nextBefore!,
+    });
+    expect(secondPage.items).toHaveLength(1);
+    expect(secondPage.items[0]?.id).not.toBe(firstPage.items[0]?.id);
+    expect(secondPage.nextBefore).toBeNull();
+    expect(await repository.history(first.ownerId, { limit: 20, before: inputs[2]!.id })).toEqual({
+      items: [],
+      nextBefore: null,
+    });
+    expect(
+      (await repository.history(first.ownerId, { limit: 20, mediaId: 'absent' })).items,
+    ).toEqual([]);
+    await sql`UPDATE media_v1.jobs SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${first.id}`;
+    await sql`DELETE FROM media_v1.processed_media WHERE id=${first.id}`;
+    const uploads = new PostgresUploadRetention(sql, new NodeFiles({ workRoot }));
+    await new PostgresJobRetention(sql, uploads).drain();
+    expect(await repository.get(first.ownerId, first.id)).not.toBeNull();
   });
 
   it('claims once and fences an expired worker after another worker reclaims', async () => {

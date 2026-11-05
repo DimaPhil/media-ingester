@@ -66,6 +66,7 @@ export abstract class YtDlpSourceBase extends DownloadSource<YtDlpOptions> {
       this.options.timeoutMs ?? 60_000,
     );
     const data = JSON.parse(raw) as {
+      id?: string;
       title?: string;
       ext?: string;
       _type?: string;
@@ -79,7 +80,11 @@ export abstract class YtDlpSourceBase extends DownloadSource<YtDlpOptions> {
     return {
       source: { ...source, uri },
       fileName: safeName(`${data.title ?? 'video'}.${data.ext ?? 'mp4'}`),
-      metadata: { downloadProvider: siteId },
+      metadata: {
+        downloadProvider: siteId,
+        ...(typeof data.id === 'string' ? { mediaId: data.id } : {}),
+        ...(data.title ? { title: data.title } : {}),
+      },
     };
   }
   protected async download(

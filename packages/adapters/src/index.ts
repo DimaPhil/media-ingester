@@ -1,6 +1,7 @@
 export * from './postgres.js';
 export * from './files.js';
 export * from './upload-retention.js';
+export * from './job-retention.js';
 export * from './media.js';
 export * from './sources.js';
 export * from './source-registry.js';

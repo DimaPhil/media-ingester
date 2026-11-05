@@ -65,7 +65,7 @@ Gemini preserves video for native video transcription and understanding. Subscri
 # Development CLI:
 pnpm cli --help
 # Released CLI (self-contained, no unpublished workspace dependencies):
-npm install -g ./media-ingest-cli-1.0.0.tgz
+npm install -g ./media-ingest-cli-1.1.0.tgz
 export MEDIA_API_URL=http://localhost:4000
 # Set MEDIA_API_TOKEN securely, or use media setup --token-stdin.
 media transcribe ./recording.mp3 --idempotency-key recording-001
@@ -80,6 +80,20 @@ Package installation installs the bundled skill into `~/.agents/skills/media-cli
 Connect MCP clients to `https://your-media-host/mcp`. The official SDK implements protocol `2026-07-28` and its legacy compatibility transport. OAuth advertises client metadata documents and DCR fallback; authorize through the server's owner-consent page. Tokens are short-lived, resource-bound and scope-checked. See [authentication details](apps/api/src/auth/README.md) for supported grants and limits.
 
 Uploads/downloads through JSON are capped at 32 MiB; URL processing defaults to a 1 GiB download cap. Source/provider timeouts and chunk concurrency are bounded. Subscription chunks are at most 60 seconds, with frames sampled every 5 seconds; Codex ASR streams at playback speed. Submission is asynchronous: save the returned job ID and poll `get`. Failed jobs can be retried; successful chunk checkpoints are reused only when the source fingerprint is unchanged. An interrupted provider call can consume usage again on recovery—execution is at least once.
+
+## Admin and retained history
+
+Open your Media Ingest origin or `/admin` and enter the owner API token. The dashboard shows running/queued work, recent failed jobs with explicit retry, and paginated successful history. Open a saved result to read its output, translation, timestamps and media identifiers, or download text/JSON. The token stays in tab memory and is cleared on sign-out.
+
+Successful outputs and their media metadata are retained in `processed_media`. Completed and failed execution records, including checkpoints, expire after 30 days; active jobs are excluded. Cleanup runs at startup and every minute in batches of 100. Failed uploads remain available as standalone files when their job records expire. Successful-upload cleanup continues independently. History contains source links and available metadata, while raw media follows the existing file lifecycle.
+
+```sh
+media history
+media result <original-job-id>
+media history --input '{"limit":20,"before":"<last-result-id>"}'
+```
+
+Migration 003 preserves existing successful outputs before enabling expiry. Historical results retain their original request and fingerprint but may lack filenames or inspection metadata. Stop older API/worker instances before applying this migration.
 
 ## Verification
 

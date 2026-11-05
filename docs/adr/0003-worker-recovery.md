@@ -2,6 +2,8 @@
 
 **Status** Accepted
 
+Execution-record retention is amended by [ADR 0007](0007-retained-results-and-job-expiry.md). Lease fencing and checkpoint recovery remain required within that retention window.
+
 ## Context
 
 A worker can crash after a provider accepts a request, or resume after a second worker claims the same job. Replaying all chunks wastes provider calls. Accepting late writes from the first worker can corrupt the result.

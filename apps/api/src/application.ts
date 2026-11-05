@@ -1,11 +1,13 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
+import { readFile } from 'node:fs/promises';
 import { MediaError } from '@media-ingest/sdk';
 import { createAuth, type AuthStore, type Identity } from './auth/index.js';
 import { contractHash, createDispatcher, type OperationDependencies } from './operations.js';
 import { createMediaMcpHandler } from './mcp.js';
 import { createRestRoutes } from './rest.js';
+import { adminContentSecurityPolicy, adminPage } from './admin-page.js';
 
 export { contractHash };
 export interface ApplicationOptions extends OperationDependencies {
@@ -46,6 +48,17 @@ export function createApplication(options: ApplicationOptions) {
     await next();
   });
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
+  app.get('/', (c) => c.redirect('/admin'));
+  app.get('/admin', (c) => {
+    c.header('content-security-policy', adminContentSecurityPolicy);
+    c.header('x-frame-options', 'DENY');
+    c.header('referrer-policy', 'no-referrer');
+    return c.html(adminPage());
+  });
+  app.get('/admin/client.js', async (c) => {
+    c.header('content-type', 'text/javascript; charset=utf-8');
+    return c.body(await readFile(new URL('../dist/admin-client.js', import.meta.url), 'utf8'));
+  });
   app.use('*', async (c, next) => {
     const response = await auth.handle(c.req.raw);
     if (response) return response;
