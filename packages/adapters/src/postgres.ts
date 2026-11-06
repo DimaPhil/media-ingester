@@ -18,6 +18,7 @@ import type {
   JobRepository,
   Lease,
   ListJobs,
+  ResultLookup,
 } from '@media-ingest/sdk';
 import type { PostgresUploadRetention } from './upload-retention.js';
 
@@ -160,6 +161,44 @@ export class PostgresJobRepository implements JobRepository {
       })),
       nextBefore: rows.length > input.limit ? rows[input.limit - 1]!.data.id : null,
     };
+  }
+
+  async findResults(
+    ownerId: string,
+    lookup: ResultLookup,
+    limit: number,
+  ): Promise<ProcessedMedia[]> {
+    const identity =
+      'mediaId' in lookup
+        ? this.sql`media_id=${lookup.mediaId}`
+        : this.sql`data->>'fingerprint'=${lookup.fingerprint}`;
+    const rows = await this.sql<{ data: ProcessedMedia }[]>`
+      SELECT data FROM media_v1.processed_media WHERE owner_id=${ownerId} AND ${identity}
+      ORDER BY completed_at DESC, id DESC LIMIT ${Math.max(1, Math.min(1000, Math.floor(limit)))}`;
+    return rows.map((row) => row.data);
+  }
+
+  async completeFromCache(
+    id: string,
+    token: string,
+    cached: ProcessedMedia,
+    _now: number,
+  ): Promise<void> {
+    await this.fenced(id, token, async (job, _now, transaction) => {
+      const [row] = await transaction<{ result: MediaResult }[]>`
+        SELECT data->'result' AS result FROM media_v1.processed_media
+        WHERE owner_id=${job.ownerId} AND id=${cached.id}`;
+      if (!row) throw new MediaError('not_found', 'Cached result not found');
+      Object.assign(job, {
+        status: 'completed',
+        result: row.result,
+        cachedFrom: cached.id,
+        error: null,
+        leaseToken: null,
+        leaseExpiresAt: null,
+      });
+      await this.uploads?.completed(transaction, job);
+    });
   }
 
   private async fenced(

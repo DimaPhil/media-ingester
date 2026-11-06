@@ -9,7 +9,15 @@ import type {
   HistoryPage,
 } from '@media-ingest/contracts';
 import { LeaseLostError, MediaError } from './errors.js';
-import type { Chunk, ChunkOutput, JobRecord, JobRepository, Lease, ListJobs } from './ports.js';
+import type {
+  Chunk,
+  ChunkOutput,
+  JobRecord,
+  JobRepository,
+  Lease,
+  ListJobs,
+  ResultLookup,
+} from './ports.js';
 import { makeProcessedMedia, summarizeProcessedMedia } from './history.js';
 
 /** Reference implementation: mutations run synchronously before their promises resolve. */
@@ -90,6 +98,45 @@ export class MemoryJobRepository implements JobRepository {
     return structuredClone({
       items: page.slice(0, input.limit).map(summarizeProcessedMedia),
       nextBefore: page.length > input.limit ? page[input.limit - 1]!.id : null,
+    });
+  }
+
+  async findResults(
+    ownerId: string,
+    lookup: ResultLookup,
+    limit: number,
+  ): Promise<ProcessedMedia[]> {
+    return structuredClone(
+      [...this.results.values()]
+        .filter(
+          ({ ownerId: owner, record }) =>
+            owner === ownerId &&
+            ('mediaId' in lookup
+              ? record.mediaId === lookup.mediaId
+              : record.fingerprint === lookup.fingerprint),
+        )
+        .map((entry) => entry.record)
+        .sort((a, b) => b.completedAt.localeCompare(a.completedAt) || b.id.localeCompare(a.id))
+        .slice(0, limit),
+    );
+  }
+
+  async completeFromCache(
+    id: string,
+    token: string,
+    cached: ProcessedMedia,
+    now: number,
+  ): Promise<void> {
+    const job = this.fenced(id, token, now);
+    if (this.results.get(cached.id)?.ownerId !== job.ownerId)
+      throw new MediaError('not_found', 'Cached result not found');
+    Object.assign(job, {
+      status: 'completed',
+      result: structuredClone(cached.result),
+      cachedFrom: cached.id,
+      error: null,
+      leaseToken: null,
+      leaseExpiresAt: null,
     });
   }
 

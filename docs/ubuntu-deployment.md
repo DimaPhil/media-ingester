@@ -58,6 +58,8 @@ Prepare the private service environment from [the example](../.env.example), bac
 
 For migration 003, stop every old API/worker before migrating. The migration backfills completed outputs into durable history and adds indexed terminal-job expiry. The new API requires migration 003 and starts bounded cleanup at startup, then every minute. Back up the database before enabling the 30-day cleanup policy.
 
+Migration 004 adds an index for result reuse ([ADR 0008](adr/0008-result-reuse.md)). It changes no data and older instances can keep running while it applies; run the explicit migration before or after starting the new version.
+
 ```sh
 docker compose build
 docker compose run --rm api node dist/migrate.js

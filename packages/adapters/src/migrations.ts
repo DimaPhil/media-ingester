@@ -13,6 +13,7 @@ export async function applyMigrations(sql: Sql): Promise<void> {
       [1, '001_initial.sql'],
       [2, '002_upload_retention.sql'],
       [3, '003_processed_media.sql'],
+      [4, '004_result_reuse.sql'],
     ] as const) {
       if (applied.has(version)) continue;
       const migration = await readFile(new URL(`../migrations/${file}`, import.meta.url), 'utf8');

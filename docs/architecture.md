@@ -60,6 +60,8 @@ Jobs store public fields plus owner, request hash, plan, chunk outputs and lease
 
 Completed and failed job records expire after 30 days. An indexed, bounded janitor runs at startup and every minute; queued/running jobs stay available. A completed job can be removed only after its result is archived. Expired failed inputs remain standalone uploads. Retained outputs have no automatic expiry. See [ADR 0007](adr/0007-retained-results-and-job-expiry.md).
 
+Unless `request.force` is true, the worker reuses the newest retained output for the same owner and an equivalent request: kind, provider, resolved model and languages, plus the exact prompt for understanding. It checks the resolved site media ID (scoped by source kind and download provider) before downloading, then the content fingerprint after materializing. A hit completes the job through a lease-fenced write with `cachedFrom` and no new history row. See [ADR 0008](adr/0008-result-reuse.md).
+
 `auth_entries` stores expiring client/consent/code/token records; bearer/code keys are hashed and `take` is atomic. The server prunes expired auth entries hourly. Uploads live on the shared media volume under owner and deterministic content/name identifiers; stable identities make repeated local submissions idempotent.
 
 The admin workspace at `/admin` has a public login shell and uses the same authenticated operation catalog for jobs, retained history, results and retry. The browser keeps the token in memory, renders stored content as text and omits credentials on source links. A content security policy restricts scripts and network requests to the service origin.

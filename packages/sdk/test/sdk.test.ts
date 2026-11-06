@@ -74,7 +74,7 @@ describe('SDK execution', () => {
     const { sdk } = fixture();
     const first = await sdk.submit('alice', request);
     await sdk.runNext();
-    await sdk.submit('alice', request);
+    await sdk.submit('alice', { ...request, force: true });
     await sdk.runNext();
     const other = await sdk.submit('bob', request);
     await sdk.runNext();
@@ -91,6 +91,124 @@ describe('SDK execution', () => {
     expect(result.result.text).toBeTruthy();
     await expect(sdk.getResult('bob', first.id)).rejects.toThrow('Result not found');
   });
+  it('reuses an equivalent retained result by content fingerprint until forced', async () => {
+    const { sdk, provider, sources } = fixture();
+    const first = await sdk.submit('alice', { ...request, prompt: 'names' });
+    await sdk.runNext();
+    expect(provider.process).toHaveBeenCalledTimes(2);
+
+    // Transcription ignores its prompt hint and a different URI with identical bytes still matches.
+    const cached = await sdk.submit('alice', {
+      ...request,
+      source: { kind: 'http', uri: 'https://mirror.test/media' },
+    });
+    await sdk.runNext();
+    const view = await sdk.get('alice', cached.id);
+    expect(view).toMatchObject({ status: 'completed', cachedFrom: first.id, completedChunks: 0 });
+    expect(view.result).toEqual((await sdk.get('alice', first.id)).result);
+    expect(provider.process).toHaveBeenCalledTimes(2);
+    expect(sources.materialize).toHaveBeenCalledTimes(2);
+    expect((await sdk.history('alice')).items).toHaveLength(1);
+
+    provider.process.mockResolvedValue({ ...output, text: 'fresh' });
+    const forced = await sdk.submit('alice', { ...request, force: true });
+    await sdk.runNext();
+    const forcedView = await sdk.get('alice', forced.id);
+    expect(forcedView.cachedFrom).toBeUndefined();
+    expect(forcedView.result?.text).toBe('fresh fresh');
+    expect(provider.process).toHaveBeenCalledTimes(4);
+
+    // The newest retained output wins afterwards.
+    const after = await sdk.submit('alice', request);
+    await sdk.runNext();
+    expect((await sdk.get('alice', after.id)).cachedFrom).toBe(forced.id);
+    expect(provider.process).toHaveBeenCalledTimes(4);
+  });
+
+  it('matches understanding prompts, languages, provider, model and owner exactly', async () => {
+    const { sdk, provider } = fixture();
+    const understanding: MediaRequest = {
+      kind: 'understanding',
+      source: request.source,
+      provider: 'google-gemini',
+      prompt: 'Summarize',
+    };
+    const first = await sdk.submit('alice', understanding);
+    await sdk.runNext();
+    const variants: MediaRequest[] = [
+      { ...understanding, prompt: 'Summarize briefly' },
+      { ...understanding, provider: 'codex' },
+      { ...understanding, model: 'other-model' },
+      { ...understanding, targetLanguage: 'fr' },
+      { ...understanding, inputLanguage: 'en' },
+      { ...request },
+    ];
+    provider.resolveModel.mockImplementation((value: MediaRequest) => value.model ?? 'test-model');
+    for (const variant of variants) {
+      const job = await sdk.submit('alice', variant);
+      await sdk.runNext();
+      expect((await sdk.get('alice', job.id)).cachedFrom).toBeUndefined();
+    }
+    const bob = await sdk.submit('bob', understanding);
+    await sdk.runNext();
+    expect((await sdk.get('bob', bob.id)).cachedFrom).toBeUndefined();
+    const same = await sdk.submit('alice', understanding);
+    await sdk.runNext();
+    expect((await sdk.get('alice', same.id)).cachedFrom).toBe(first.id);
+    expect(provider.process).toHaveBeenCalledTimes(2 * (variants.length + 2));
+  });
+
+  it('reuses by site media ID before download, scoped to source kind and download site', async () => {
+    const { sdk, provider, sources } = fixture();
+    const youtube: MediaRequest = {
+      ...request,
+      source: { kind: 'youtube', uri: 'https://youtu.be/abc' },
+    };
+    sources.resolve.mockImplementation(async (source: MediaRequest['source']) => ({
+      source,
+      fileName: 'input',
+      metadata: { mediaId: 'abc', downloadProvider: source.kind },
+    }));
+    const first = await sdk.submit('alice', youtube);
+    await sdk.runNext();
+    const cached = await sdk.submit('alice', {
+      ...youtube,
+      source: { kind: 'youtube', uri: 'https://www.youtube.com/watch?v=abc' },
+    });
+    await sdk.runNext();
+    expect((await sdk.get('alice', cached.id)).cachedFrom).toBe(first.id);
+    expect(sources.materialize).toHaveBeenCalledOnce();
+    expect(provider.process).toHaveBeenCalledTimes(2);
+
+    // Same site ID on another site is not the same media; identical bytes still match afterwards.
+    const other = await sdk.submit('alice', {
+      ...youtube,
+      source: { kind: 'instagram', uri: 'https://instagram.com/p/abc' },
+    });
+    await sdk.runNext();
+    expect((await sdk.get('alice', other.id)).cachedFrom).toBe(first.id);
+    expect(sources.materialize).toHaveBeenCalledTimes(2);
+    expect(provider.process).toHaveBeenCalledTimes(2);
+  });
+
+  it('processes normally when the repository does not support result reuse', async () => {
+    const base = fixture();
+    const legacy = new Proxy(base.repository, {
+      get(target, key) {
+        if (key === 'findResults' || key === 'completeFromCache') return undefined;
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const { sdk, provider } = fixture({ repository: legacy });
+    await sdk.submit('alice', request);
+    await sdk.runNext();
+    const second = await sdk.submit('alice', request);
+    await sdk.runNext();
+    expect((await sdk.get('alice', second.id)).cachedFrom).toBeUndefined();
+    expect(provider.process).toHaveBeenCalledTimes(4);
+  });
+
   it('lets a provider select video for transcription while preserving fallback request-kind behavior', async () => {
     const base = fixture();
     const inputFormat = vi.fn(() => 'video' as const);
@@ -408,6 +526,28 @@ describe('repository concurrency and fencing', () => {
       time,
     );
     expect((await sdk.get('alice', job.id)).status).toBe('completed');
+  });
+
+  it('fences cached completion and refuses another owner’s retained result', async () => {
+    let time = 1000;
+    const { sdk, repository } = fixture({ clock: () => time });
+    const bobJob = await sdk.submit('bob', request);
+    await sdk.runNext();
+    const bobResult = await sdk.getResult('bob', bobJob.id);
+    expect(await repository.findResults('alice', { fingerprint: 'content-v1' }, 10)).toEqual([]);
+    expect(await repository.findResults('bob', { mediaId: 'content-v1' }, 10)).toHaveLength(1);
+    const job = await sdk.submit('alice', request);
+    const first = (await repository.claim(time, 100))!;
+    await expect(
+      repository.completeFromCache(job.id, first.token, bobResult, time),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    time = 1101;
+    const second = (await repository.claim(time, 100))!;
+    await expect(
+      repository.completeFromCache(job.id, first.token, bobResult, time),
+    ).rejects.toBeInstanceOf(LeaseLostError);
+    await repository.fail(job.id, second.token, { code: 'x', message: 'x', retryable: true }, time);
+    expect((await sdk.get('alice', job.id)).cachedFrom).toBeUndefined();
   });
 
   it('rejects missing chunks and duplicate IDs, and never exposes mutable storage references', async () => {

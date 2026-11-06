@@ -9,6 +9,7 @@ Use [architecture](architecture.md) for invariants and class hierarchies, [accep
 - Long-running Node/container deployment. The Vercel proposal was withdrawn. The owner will provision and attach Neon; keep database and media-volume backups separate.
 - One public operation catalog drives REST, CLI, MCP, validation and schemas. CLI media actions always call the API. SDK embedding calls the processing engine directly through replaceable ports.
 - Successful outputs and media metadata live in durable `processed_media`; terminal execution records expire after 30 days. The `/admin` workspace reads the shared history/result operations. Preserve the atomic completion/archive write and migration 003 backfill before enabling cleanup; see [ADR 0007](adr/0007-retained-results-and-job-expiry.md).
+- Equivalent requests reuse the newest retained output indefinitely; `request.force` (CLI `--force`) always processes from scratch. Transcription ignores its prompt hint for matching; understanding requires the exact prompt. See [ADR 0008](adr/0008-result-reuse.md).
 - Native subscription providers are explicitly selected. `codex` supports transcription and understanding; `claude-code` supports understanding only. Neither subscription path may silently use a paid API, including for translation.
 - Subscription understanding prepares timestamped frames and, when audio exists, a Codex realtime transcript before starting Codex or Claude. Both are supplied in the initial agent context. Silent video uses frames without ASR. Claude is not labeled as the transcription provider.
 - Use dedicated persistent writable CLI credential homes and native login. Do not copy a host's agent home or bake credentials into images. Remove inherited API-key overrides; no private credential parsing or direct token reuse.
@@ -34,6 +35,7 @@ flowchart LR
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | Wire DTOs, provider IDs, operation catalog        | `packages/contracts/src/media.ts`, `operations.ts`, `documents.ts`                                                       |
 | Durable jobs, interfaces, aggregation             | `packages/sdk/src/ports.ts`, `sdk.ts`, `worker.ts`, `chunks.ts`                                                          |
+| Result reuse policy                               | `packages/sdk/src/cache.ts`, `worker.ts`, `packages/adapters/src/postgres.ts`                                            |
 | Retained results, job expiry and admin UI         | `packages/sdk/src/history.ts`, `packages/adapters/src/job-retention.ts`, `apps/api/src/admin-page.ts`, `admin-client.ts` |
 | Source registration and implementations           | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`                                                     |
 | Media inspection, model routing and API providers | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                                                           |

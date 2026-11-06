@@ -27,6 +27,8 @@ Artifacts are opaque URIs plus filenames and stable fingerprints. Providers retu
 
 Built-in repositories save successful outputs independently of job execution state. `sdk.history(ownerId, { limit, before, mediaId })` returns cursor-paginated summaries and `sdk.getResult(ownerId, originalJobId)` returns a saved output. The worker supplies resolved source metadata, inspection and available size when completing a job. Custom repositories can implement the optional history methods; processing with an older repository still works, while history calls report `unsupported_history`.
 
+Workers reuse the newest retained output for the same owner, media (resolved `metadata.mediaId` before download, then content fingerprint) and an equivalent request; see `resultCacheKey`. Set `request.force` to process from scratch. Repositories enable reuse by implementing the optional `findResults` and `completeFromCache` methods; without them every job processes normally.
+
 ### Replace one built-in provider
 
 The registries and concrete classes are exported by `@media-ingest/adapters`. Pass the same registries to `MediaSdk` after overriding a specific source or model. A source override implements `SourceAdapter`. A model registry override implements `NodeProviderAdapter`, including input format selection and translation, so the override controls every phase for that provider ID.

@@ -34,6 +34,10 @@ const requestFields = {
   prompt: z.string().min(1).max(20000).optional(),
   inputLanguage: z.string().min(2).max(32).optional(),
   targetLanguage: z.string().min(2).max(32).optional(),
+  force: z
+    .boolean()
+    .optional()
+    .describe('Process from scratch instead of reusing a retained result for the same media'),
 };
 const transcriptionRequest = z
   .object({
@@ -102,6 +106,8 @@ export const jobSchema = z.object({
   attempt: z.number().int().nonnegative(),
   result: resultSchema.nullable(),
   error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }).nullable(),
+  /** Retained result ID reused instead of processing; absent when this job produced its result. */
+  cachedFrom: z.uuid().optional(),
 });
 export type JobView = z.infer<typeof jobSchema>;
 export const resolvedSourceSchema = z.object({
