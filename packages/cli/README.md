@@ -10,6 +10,7 @@ export MEDIA_API_URL=https://media.example.com
 media setup --url https://media.example.com --token-stdin
 media transcribe ./recording.mp3
 media understand https://example.com/video.mp4 --prompt 'Describe the demonstration'
+media understand https://example.com/video.mp4 --prompt 'Describe the demonstration' --force
 media get <job-id>
 media list --input '{"limit":10}'
 media history
@@ -19,6 +20,8 @@ media result <job-id>
 `MEDIA_API_URL` and `MEDIA_API_TOKEN` override `~/.lilfeel/media/config.json`. Setup writes mode 0600 and never prints the token. Remote APIs require HTTPS; localhost HTTP works in development. Requests time out after two minutes. Mutations check the server's contract fingerprint first and fail closed on drift. API tokens must have the needed scopes.
 
 Successful outputs and available media metadata remain in processing history after completed/failed execution records expire at 30 days. `history` returns summaries and a `nextBefore` cursor; pass it as `before` to load the next page. `result <id>` returns the complete saved output using the original job ID. Use `get` and `retry` while the execution record is retained.
+
+`transcribe` and `understand` reuse the newest saved result for the same media and settings (understanding also matches the exact prompt). Such jobs complete without processing and report `cachedFrom`. Pass `--force`, or `"force": true` in a `submit` request, to process from scratch.
 
 `media <operation> --input '<json>'` and `--file request.json` cover every catalog operation. `--file -` reads JSON from stdin. `get` and `retry` also accept a positional job ID; `upload` accepts a local path. Local uploads and inline downloads are limited to 32 MiB. `download` emits base64 in JSON; remote-source processing can handle larger media within server limits. Save the submission's ID and poll `get`; submission does not wait for processing.
 

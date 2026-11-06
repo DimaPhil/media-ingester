@@ -263,6 +263,51 @@ describe('real HTTP, CLI and durable worker', () => {
     await expect(cli(['retry', queued.id])).rejects.toMatchObject({ code: 1 });
   });
 
+  it('reuses retained results across CLI and MCP submissions unless forced', async () => {
+    const url = 'https://example.com/media.wav';
+    const first = jobSchema.parse(await cliJson(['transcribe', url]));
+    await sdk.runNext();
+    expect(processed).toEqual([0, 1]);
+
+    const cached = jobSchema.parse(await cliJson(['transcribe', url, '--prompt', 'names']));
+    await sdk.runNext();
+    const cachedView = jobSchema.parse(await cliJson(['get', cached.id]));
+    expect(cachedView).toMatchObject({ status: 'completed', cachedFrom: first.id });
+    expect(cachedView.result?.text).toBe('chunk 0 chunk 1');
+    expect(processed).toEqual([0, 1]);
+
+    const forced = jobSchema.parse(await cliJson(['transcribe', url, '--force']));
+    expect(forced.request.force).toBe(true);
+    await sdk.runNext();
+    expect(jobSchema.parse(await cliJson(['get', forced.id])).cachedFrom).toBeUndefined();
+    expect(processed).toEqual([0, 1, 0, 1]);
+
+    const understanding = {
+      kind: 'understanding',
+      source: { kind: 'http', uri: url },
+      provider: 'google-gemini',
+      prompt: 'Summarize',
+    };
+    const submitOverMcp = async (request: Record<string, unknown>) => {
+      const call = await rpc('tools/call', { name: 'media_submit', arguments: { request } });
+      return jobSchema.parse((await call.json()).result.structuredContent);
+    };
+    const understood = await submitOverMcp(understanding);
+    await sdk.runNext();
+    const reused = await submitOverMcp(understanding);
+    await sdk.runNext();
+    const changedPrompt = await submitOverMcp({ ...understanding, prompt: 'List speakers' });
+    await sdk.runNext();
+    const forcedMcp = await submitOverMcp({ ...understanding, force: true });
+    await sdk.runNext();
+    expect((await sdk.get('owner', reused.id)).cachedFrom).toBe(understood.id);
+    expect((await sdk.get('owner', changedPrompt.id)).cachedFrom).toBeUndefined();
+    expect((await sdk.get('owner', forcedMcp.id)).cachedFrom).toBeUndefined();
+    expect(processed).toHaveLength(10);
+    const history = (await cliJson(['history'])) as { items: unknown[] };
+    expect(history.items).toHaveLength(5);
+  });
+
   it('deduplicates concurrent submissions and rejects changed requests with the same key', async () => {
     const args = [
       'transcribe',

@@ -40,6 +40,8 @@ export interface ListJobs {
   limit: number;
   status?: JobView['status'];
 }
+/** Owner-scoped retained-result lookup by site media ID or by content fingerprint. */
+export type ResultLookup = { mediaId: string } | { fingerprint: string };
 /** Every mutation below must be atomic. Fenced writes reject expired or replaced tokens. */
 export interface JobRepository {
   enqueue(job: JobRecord): Promise<JobRecord>;
@@ -70,6 +72,10 @@ export interface JobRepository {
     now: number,
     media?: ProcessedMediaDetails,
   ): Promise<void>;
+  /** Retained results for this owner and identity, newest first. Enables result reuse. */
+  findResults?(ownerId: string, lookup: ResultLookup, limit: number): Promise<ProcessedMedia[]>;
+  /** Fenced completion with a retained result. Adds no history record. */
+  completeFromCache?(id: string, token: string, cached: ProcessedMedia, now: number): Promise<void>;
   fail(id: string, token: string, error: NonNullable<JobView['error']>, now: number): Promise<void>;
   retry(ownerId: string, id: string, now: number): Promise<JobRecord>;
 }

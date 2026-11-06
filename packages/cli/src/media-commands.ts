@@ -55,6 +55,7 @@ export function registerMediaCommands(
       .option('--input-language <language>')
       .option('--target-language <language>')
       .option('--idempotency-key <key>')
+      .option('--force', 'Process from scratch instead of reusing a retained result')
       .action(
         async (
           sourceValue: string,
@@ -66,6 +67,7 @@ export function registerMediaCommands(
             inputLanguage?: string;
             targetLanguage?: string;
             idempotencyKey?: string;
+            force?: boolean;
           },
         ) => {
           const api = await client();
@@ -78,6 +80,7 @@ export function registerMediaCommands(
             prompt: options.prompt,
             inputLanguage: options.inputLanguage,
             targetLanguage: options.targetLanguage,
+            ...(options.force ? { force: true } : {}),
           });
           if (source.kind === 'local_file')
             request.source = (await uploadFile(api, source.uri)).source;

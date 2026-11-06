@@ -1,7 +1,8 @@
-import { resultSchema } from '@media-ingest/contracts';
+import { resultSchema, type ResolvedSource } from '@media-ingest/contracts';
+import { findReusableResult, RESULT_CACHE_CANDIDATES } from './cache.js';
 import { aggregate, planChunks, validateChunk } from './chunks.js';
 import { MediaError, LeaseLostError } from './errors.js';
-import type { AdapterContext, JobRepository, Lease, SdkOptions } from './ports.js';
+import type { AdapterContext, JobRepository, Lease, ResultLookup, SdkOptions } from './ports.js';
 
 export class JobWorker {
   private readonly concurrency: number;
@@ -107,6 +108,14 @@ export class JobWorker {
     const { job, token } = lease;
     const source = await this.options.sources.resolve(job.request.source, context);
     abort.signal.throwIfAborted();
+    // A stable site ID lets a retained result skip the download entirely.
+    const mediaId = source.metadata.mediaId;
+    if (
+      typeof mediaId === 'string' &&
+      mediaId.length &&
+      (await this.reuse(lease, { mediaId }, abort.signal, source))
+    )
+      return;
     const artifact = await this.options.sources.materialize(source, context);
     abort.signal.throwIfAborted();
     if (!artifact.fingerprint)
@@ -116,6 +125,7 @@ export class JobWorker {
         'source_changed',
         'Source bytes changed since the saved chunks; submit a new job',
       );
+    if (await this.reuse(lease, { fingerprint: artifact.fingerprint }, abort.signal)) return;
     const inspection = await this.options.media.inspect(artifact, context);
     if (job.request.kind === 'transcription' && !inspection.hasAudio)
       throw new MediaError('invalid_media', 'Source has no audio');
@@ -166,5 +176,31 @@ export class JobWorker {
       inspection,
       ...(artifact.sizeBytes === undefined ? {} : { sizeBytes: artifact.sizeBytes }),
     });
+  }
+
+  /** Completes the job with an equivalent retained result unless the request forces a fresh run. */
+  private async reuse(
+    { job, token }: Lease,
+    lookup: ResultLookup,
+    signal: AbortSignal,
+    site?: ResolvedSource,
+  ): Promise<boolean> {
+    if (job.request.force || !this.repository.findResults || !this.repository.completeFromCache)
+      return false;
+    const candidates = await this.repository.findResults(
+      job.ownerId,
+      lookup,
+      RESULT_CACHE_CANDIDATES,
+    );
+    signal.throwIfAborted();
+    const cached = findReusableResult(job.request, candidates, site);
+    if (!cached) return false;
+    await this.repository.completeFromCache(
+      job.id,
+      token,
+      { ...cached, result: resultSchema.parse(cached.result) },
+      this.now(),
+    );
+    return true;
   }
 }

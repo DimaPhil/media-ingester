@@ -265,6 +265,87 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
     expect(await repository.get(first.ownerId, first.id)).not.toBeNull();
   });
 
+  it('finds owner-scoped results newest first and completes fenced jobs from them without a new history record', async () => {
+    const owner = job();
+    const other = job();
+    const result = (text: string) => ({
+      kind: 'transcription' as const,
+      provider: 'openai' as const,
+      model: 'fixture',
+      text,
+      segments: [],
+      timeRanges: [],
+      detectedLanguage: null,
+    });
+    const media = {
+      source: {
+        source: owner.request.source,
+        fileName: 'clip.mp3',
+        metadata: { mediaId: `vid-${owner.ownerId}` },
+      },
+      inspection: { durationMs: 1, hasAudio: true, hasVideo: false },
+    };
+    const inputs = [owner, { ...job(), ownerId: owner.ownerId }, other];
+    for (const [index, input] of inputs.entries()) {
+      await repository.enqueue(input);
+      const lease = (await repository.claim(0, 60_000))!;
+      expect(lease.job.id).toBe(input.id);
+      const chunk = result(`run ${index}`);
+      await repository.savePlan(
+        input.id,
+        lease.token,
+        [{ index: 0, startMs: 0, endMs: 1 }],
+        `reuse-${owner.ownerId}`,
+        0,
+      );
+      await repository.saveChunk(input.id, lease.token, 0, chunk, 0);
+      await repository.complete(input.id, lease.token, chunk, 0, media);
+    }
+    const byContent = await repository.findResults(
+      owner.ownerId,
+      { fingerprint: `reuse-${owner.ownerId}` },
+      10,
+    );
+    expect(byContent.map((record) => record.id)).toEqual([inputs[1]!.id, owner.id]);
+    const bySite = await repository.findResults(
+      owner.ownerId,
+      { mediaId: `vid-${owner.ownerId}` },
+      1,
+    );
+    expect(bySite.map((record) => record.id)).toEqual([inputs[1]!.id]);
+    expect(await repository.findResults('absent', { mediaId: `vid-${owner.ownerId}` }, 10)).toEqual(
+      [],
+    );
+
+    let now = 1000;
+    const workers = new PostgresJobRepository(sql, () => now);
+    const reuse = { ...job(), ownerId: owner.ownerId };
+    await workers.enqueue(reuse);
+    const stale = (await workers.claim(now, 100))!;
+    expect(stale.job.id).toBe(reuse.id);
+    const [otherRecord] = await repository.findResults(
+      other.ownerId,
+      { fingerprint: `reuse-${owner.ownerId}` },
+      1,
+    );
+    await expect(
+      workers.completeFromCache(reuse.id, stale.token, otherRecord!, now),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    now = 1101;
+    const current = (await workers.claim(now, 100))!;
+    await expect(
+      workers.completeFromCache(reuse.id, stale.token, bySite[0]!, now),
+    ).rejects.toBeInstanceOf(LeaseLostError);
+    await workers.completeFromCache(reuse.id, current.token, bySite[0]!, now);
+    expect(await workers.get(owner.ownerId, reuse.id)).toMatchObject({
+      status: 'completed',
+      cachedFrom: inputs[1]!.id,
+      result: result('run 1'),
+      leaseToken: null,
+    });
+    expect((await repository.history(owner.ownerId, { limit: 20 })).items).toHaveLength(2);
+  });
+
   it('claims once and fences an expired worker after another worker reclaims', async () => {
     let now = 1000;
     const workers = new PostgresJobRepository(sql, () => now);
@@ -490,6 +571,24 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
       await expect(
         jobs.enqueue({ ...first, id: randomUUID(), idempotencyKey: 'missing' }),
       ).rejects.toThrow();
+    });
+
+    it('deletes the upload after the last job completes from a retained result', async () => {
+      const { retention, first, jobs, path, claim, complete } = await fixture();
+      await jobs.enqueue(first);
+      // Fixture jobs share createdAt, so claim the first one before queueing the next.
+      const original = await claim();
+      const reused = await jobs.enqueue({ ...first, id: randomUUID(), idempotencyKey: 'reused' });
+      await complete(original);
+      await retention.drain();
+      expect(await readFile(path, 'utf8')).toBe('original bytes');
+      const lease = await claim();
+      expect(lease.job.id).toBe(reused.id);
+      const [cached] = await jobs.findResults(first.ownerId, { fingerprint: 'source' }, 1);
+      await jobs.completeFromCache(reused.id, lease.token, cached!, 1000);
+      await retention.drain();
+      await expect(access(path)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await jobs.get(first.ownerId, reused.id))?.cachedFrom).toBe(first.id);
     });
 
     it('protects an identical reupload between submission and completion, and leaves unrelated files intact', async () => {
