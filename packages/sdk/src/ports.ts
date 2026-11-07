@@ -10,10 +10,21 @@ import type {
   HistoryPage,
 } from '@media-ingest/contracts';
 
+/**
+ * `startMs`/`endMs` is the extracted media range. When a boundary has no pause, neighboring
+ * chunks overlap and `keepStartMs`/`keepEndMs` mark the part each chunk owns in the result.
+ */
 export interface Chunk {
   index: number;
   startMs: number;
   endMs: number;
+  keepStartMs?: number;
+  keepEndMs?: number;
+}
+/** Audio power per fixed frame in dBFS; `-Infinity` marks digital silence. */
+export interface LoudnessProfile {
+  frameMs: number;
+  levels: ArrayLike<number>;
 }
 export interface ChunkOutput {
   text: string;
@@ -95,9 +106,17 @@ export interface Artifact {
   /** Canonical requested clip duration, excluding container/codec padding. */
   durationMs?: number;
 }
+export interface MaterializeOptions {
+  /** The provider needs only the audio stream; sources may fetch less data. */
+  audioOnly?: boolean;
+}
 export interface SourceAdapter {
   resolve(source: Source, context: AdapterContext): Promise<ResolvedSource>;
-  materialize(source: ResolvedSource, context: AdapterContext): Promise<Artifact>;
+  materialize(
+    source: ResolvedSource,
+    context: AdapterContext,
+    options?: MaterializeOptions,
+  ): Promise<Artifact>;
 }
 export interface MediaInspection {
   durationMs: number;
@@ -115,6 +134,8 @@ export interface MediaAdapter {
     kind: MediaChunkKind,
     context: AdapterContext,
   ): Promise<Artifact>;
+  /** Measures audio power so chunk boundaries can fall in pauses instead of inside words. */
+  loudness?(artifact: Artifact, context: AdapterContext): Promise<LoudnessProfile>;
   cleanup(context: AdapterContext): Promise<void>;
 }
 export interface ProviderAdapter {
@@ -122,6 +143,8 @@ export interface ProviderAdapter {
   chunkDurationMs(request: MediaRequest): number;
   /** Select the representation supplied to this provider. Omission preserves request-kind behavior. */
   inputFormat?(request: MediaRequest, inspection: MediaInspection): MediaInputFormat;
+  /** Streams this provider reads from the source. `audio` lets sources skip video bytes. */
+  sourceMedia?(request: MediaRequest): 'audio' | 'video';
   process(artifact: Artifact, request: MediaRequest, context: AdapterContext): Promise<ChunkOutput>;
   translate?(text: string, request: MediaRequest, context: AdapterContext): Promise<string>;
 }

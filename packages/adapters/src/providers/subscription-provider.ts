@@ -40,6 +40,10 @@ export abstract class SubscriptionProvider implements ProviderAdapter {
     return 60_000;
   }
 
+  sourceMedia(request: MediaRequest): 'audio' | 'video' {
+    return request.kind === 'understanding' ? 'video' : 'audio';
+  }
+
   inputFormat(request: MediaRequest, inspection: MediaInspection): MediaInputFormat {
     return request.kind === 'understanding' && inspection.hasVideo ? 'video' : 'audio_pcm';
   }

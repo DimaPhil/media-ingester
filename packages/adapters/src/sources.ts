@@ -1,5 +1,5 @@
 import type { Source, ResolvedSource } from '@media-ingest/contracts';
-import type { AdapterContext, SourceAdapter } from '@media-ingest/sdk';
+import type { AdapterContext, MaterializeOptions, SourceAdapter } from '@media-ingest/sdk';
 import { YtDlpSourceRegistry, type YtDlpSiteDefinition } from './source-registry.js';
 import type { YtDlpOptions } from './sources/yt-dlp-base.js';
 import { LocalFileSource } from './sources/local.js';
@@ -93,7 +93,7 @@ export class NodeSources implements SourceAdapter {
     return this.adapter(source.kind).resolve(source, context);
   }
 
-  materialize(resolved: ResolvedSource, context: AdapterContext) {
-    return this.adapter(resolved.source.kind).materialize(resolved, context);
+  materialize(resolved: ResolvedSource, context: AdapterContext, options?: MaterializeOptions) {
+    return this.adapter(resolved.source.kind).materialize(resolved, context, options);
   }
 }

@@ -79,6 +79,8 @@ describe('provider normalization', () => {
       'salut',
     );
     expect(providers.resolveModel({ ...request, provider: 'google-speech' })).toBe('chirp_3');
+    // Overrides without a source declaration keep downloading the full source.
+    expect(providers.sourceMedia(request)).toBe('video');
   });
   it('selects native video for Gemini and audio for audio-only providers and sources', () => {
     const provider = new NodeProviders();
@@ -91,6 +93,18 @@ describe('provider normalization', () => {
     }
     expect(provider.inputFormat(request, video)).toBe('audio');
     expect(provider.inputFormat({ ...request, provider: 'google-speech' }, video)).toBe('audio');
+  });
+
+  it('downloads audio only for providers that never read video', () => {
+    const provider = new NodeProviders();
+    const understanding = { ...request, kind: 'understanding' as const, prompt: 'describe' };
+    expect(provider.sourceMedia(request)).toBe('audio');
+    expect(provider.sourceMedia({ ...request, provider: 'google-speech' })).toBe('audio');
+    expect(provider.sourceMedia({ ...request, provider: 'codex' })).toBe('audio');
+    expect(provider.sourceMedia({ ...request, provider: 'google-gemini' })).toBe('video');
+    expect(provider.sourceMedia({ ...understanding, provider: 'google-gemini' })).toBe('video');
+    expect(provider.sourceMedia({ ...understanding, provider: 'codex' })).toBe('video');
+    expect(provider.sourceMedia({ ...understanding, provider: 'claude-code' })).toBe('video');
   });
 
   it('sends the video MIME type through Gemini upload and transcription generation', async () => {

@@ -90,7 +90,7 @@ export abstract class YtDlpSourceBase extends DownloadSource<YtDlpOptions> {
   protected async download(
     { source }: ResolvedSource,
     { signal }: AdapterContext,
-    { directory, maxBytes }: DownloadTarget,
+    { directory, maxBytes, audioOnly }: DownloadTarget,
   ) {
     const { uri, args } = await this.socialSource(source);
     await runCommand(
@@ -105,7 +105,8 @@ export abstract class YtDlpSourceBase extends DownloadSource<YtDlpOptions> {
         String(maxBytes),
         ...args,
         '-f',
-        'best[ext=mp4]/best',
+        // Audio-only formats are far smaller; muxed formats remain the fallback.
+        audioOnly ? 'bestaudio/best[ext=mp4]/best' : 'best[ext=mp4]/best',
         '-o',
         join(directory, 'download-%(autonumber)05d.%(ext)s'),
         '--',

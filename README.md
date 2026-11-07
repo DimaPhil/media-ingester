@@ -65,7 +65,7 @@ Gemini preserves video for native video transcription and understanding. Subscri
 # Development CLI:
 pnpm cli --help
 # Released CLI (self-contained, no unpublished workspace dependencies):
-npm install -g ./media-ingest-cli-1.2.0.tgz
+npm install -g ./media-ingest-cli-1.3.0.tgz
 export MEDIA_API_URL=http://localhost:4000
 # Set MEDIA_API_TOKEN securely, or use media setup --token-stdin.
 media transcribe ./recording.mp3 --idempotency-key recording-001
@@ -81,7 +81,7 @@ Package installation installs the bundled skill into `~/.agents/skills/media-cli
 
 Connect MCP clients to `https://your-media-host/mcp`. The official SDK implements protocol `2026-07-28` and its legacy compatibility transport. OAuth advertises client metadata documents and DCR fallback; authorize through the server's owner-consent page. Tokens are short-lived, resource-bound and scope-checked. See [authentication details](apps/api/src/auth/README.md) for supported grants and limits.
 
-Uploads/downloads through JSON are capped at 32 MiB; URL processing defaults to a 1 GiB download cap. Source/provider timeouts and chunk concurrency are bounded. Subscription chunks are at most 60 seconds, with frames sampled every 5 seconds; Codex ASR streams at playback speed. Submission is asynchronous: save the returned job ID and poll `get`. Failed jobs can be retried; successful chunk checkpoints are reused only when the source fingerprint is unchanged. An interrupted provider call can consume usage again on recovery—execution is at least once.
+Uploads/downloads through JSON are capped at 32 MiB; URL processing defaults to a 1 GiB download cap. Source/provider timeouts and chunk concurrency are bounded. Chunk boundaries fall in speech pauses, overlapping and stitching only where audio never pauses. Subscription chunks are at most 60 seconds, with frames sampled every 5 seconds; Codex ASR streams at playback speed. Submission is asynchronous: save the returned job ID and poll `get`. Failed jobs can be retried; successful chunk checkpoints are reused only when the source fingerprint is unchanged. An interrupted provider call can consume usage again on recovery—execution is at least once.
 
 Repeated requests reuse saved results indefinitely. A job for the same owner and media (same site media ID, or identical content bytes) with the same kind, provider, resolved model and languages completes from the newest retained output without downloading or calling the provider; understanding also requires the exact same prompt, while transcription ignores its prompt hint. The job's `cachedFrom` names the reused result. Set `force: true` in the request (CLI `--force`) to process from scratch, for example while iterating on prompts; the fresh output becomes the one later requests reuse. See [ADR 0008](docs/adr/0008-result-reuse.md).
 

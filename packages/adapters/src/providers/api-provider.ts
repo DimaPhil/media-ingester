@@ -38,6 +38,10 @@ export abstract class ApiProvider implements ProviderAdapter {
     return 'audio';
   }
 
+  sourceMedia(request: MediaRequest): 'audio' | 'video' {
+    return request.kind === 'understanding' ? 'video' : 'audio';
+  }
+
   protected signal(context: AdapterContext): AbortSignal {
     return AbortSignal.any([context.signal, AbortSignal.timeout(this.timeoutMs ?? 10 * 60_000)]);
   }

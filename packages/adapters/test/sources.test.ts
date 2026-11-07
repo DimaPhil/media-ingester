@@ -105,6 +105,27 @@ describe('source adapters', () => {
       return '';
     });
     expect((await sources.materialize(resolved, context)).fileName).toBe('Title.mp4');
+    expect(mocks.run.mock.calls.at(-1)![1]).toEqual(
+      expect.arrayContaining(['-f', 'best[ext=mp4]/best']),
+    );
+    mocks.run.mockImplementationOnce(async (_binary: string, args: string[]) => {
+      const template = args[args.indexOf('-o') + 1]!;
+      await writeFile(
+        template.replace('%(autonumber)05d', '00001').replace('%(ext)s', 'webm'),
+        'audio',
+      );
+      return '';
+    });
+    // Audio-only downloads keep the resolved title with the delivered container.
+    const audio = await sources.materialize(
+      resolved,
+      { ...context, attempt: 2 },
+      { audioOnly: true },
+    );
+    expect(audio.fileName).toBe('Title.webm');
+    expect(mocks.run.mock.calls.at(-1)![1]).toEqual(
+      expect.arrayContaining(['-f', 'bestaudio/best[ext=mp4]/best']),
+    );
     mocks.run.mockResolvedValueOnce(JSON.stringify({ _type: 'playlist' }));
     await expect(
       sources.resolve({ kind: 'youtube', uri: 'https://youtu.be/x' }, context),
@@ -297,11 +318,13 @@ describe('source adapters', () => {
       materialize: vi.fn().mockResolvedValue(artifact),
     };
     const sources = new NodeSources({ files, overrides: { telegram: override } });
-    expect(await sources.materialize(await sources.resolve(source, context), context)).toEqual(
-      artifact,
-    );
+    expect(
+      await sources.materialize(await sources.resolve(source, context), context, {
+        audioOnly: true,
+      }),
+    ).toEqual(artifact);
     expect(override.resolve).toHaveBeenCalledWith(source, context);
-    expect(override.materialize).toHaveBeenCalledWith(resolved, context);
+    expect(override.materialize).toHaveBeenCalledWith(resolved, context, { audioOnly: true });
     await expect(
       sources.resolve({ kind: 'google_drive', uri: 'invalid' }, context),
     ).rejects.toThrow('absolute');

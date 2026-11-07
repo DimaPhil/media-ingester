@@ -13,6 +13,7 @@ Use [architecture](architecture.md) for invariants and class hierarchies, [accep
 - Native subscription providers are explicitly selected. `codex` supports transcription and understanding; `claude-code` supports understanding only. Neither subscription path may silently use a paid API, including for translation.
 - Subscription understanding prepares timestamped frames and, when audio exists, a Codex realtime transcript before starting Codex or Claude. Both are supplied in the initial agent context. Silent video uses frames without ASR. Claude is not labeled as the transcription provider.
 - Use dedicated persistent writable CLI credential homes and native login. Do not copy a host's agent home or bake credentials into images. Remove inherited API-key overrides; no private credential parsing or direct token reuse.
+- Chunk boundaries fall in measured pauses; without one, neighbors overlap and aggregation stitches them. Saved plans stay authoritative. Audio-only providers download audio-only formats. See [ADR 0009](adr/0009-pause-aligned-chunks.md).
 - Exactly silent decoded audio skips subscription ASR. Check for all-zero samples before attributing a transcript to Codex. Missing ASR output on nonzero audio remains an error.
 
 ```mermaid
@@ -31,21 +32,21 @@ flowchart LR
 
 ## Where changes belong
 
-| Area                                              | Owning source                                                                                                            |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Wire DTOs, provider IDs, operation catalog        | `packages/contracts/src/media.ts`, `operations.ts`, `documents.ts`                                                       |
-| Durable jobs, interfaces, aggregation             | `packages/sdk/src/ports.ts`, `sdk.ts`, `worker.ts`, `chunks.ts`                                                          |
-| Result reuse policy                               | `packages/sdk/src/cache.ts`, `worker.ts`, `packages/adapters/src/postgres.ts`                                            |
-| Retained results, job expiry and admin UI         | `packages/sdk/src/history.ts`, `packages/adapters/src/job-retention.ts`, `apps/api/src/admin-page.ts`, `admin-client.ts` |
-| Source registration and implementations           | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`                                                     |
-| Media inspection, model routing and API providers | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                                                           |
-| Subscription audio                                | `packages/adapters/src/codex-audio.ts`, `codex-realtime.ts`, `codex-app-server.ts`                                       |
-| Subscription understanding and process isolation  | `packages/adapters/src/subscription-understanding.ts`, `subscription-media.ts`, `subscription-runtime.ts`                |
-| Server config and composition                     | `apps/api/src/config.ts`, `main.ts`                                                                                      |
-| HTTP middleware, REST/MCP and shared dispatch     | `apps/api/src/application.ts`, `rest.ts`, `mcp.ts`, `operations.ts`                                                      |
-| Owner and OAuth authentication                    | `apps/api/src/auth/`                                                                                                     |
-| HTTP client and distributable CLI                 | `packages/client`, `packages/cli`                                                                                        |
-| Release and dependency enforcement                | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`                                                 |
+| Area                                                  | Owning source                                                                                                            |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Wire DTOs, provider IDs, operation catalog            | `packages/contracts/src/media.ts`, `operations.ts`, `documents.ts`                                                       |
+| Durable jobs, interfaces, chunk planning, aggregation | `packages/sdk/src/ports.ts`, `sdk.ts`, `worker.ts`, `chunks.ts`                                                          |
+| Result reuse policy                                   | `packages/sdk/src/cache.ts`, `worker.ts`, `packages/adapters/src/postgres.ts`                                            |
+| Retained results, job expiry and admin UI             | `packages/sdk/src/history.ts`, `packages/adapters/src/job-retention.ts`, `apps/api/src/admin-page.ts`, `admin-client.ts` |
+| Source registration and implementations               | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`                                                     |
+| Media inspection, model routing and API providers     | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                                                           |
+| Subscription audio                                    | `packages/adapters/src/codex-audio.ts`, `codex-realtime.ts`, `codex-app-server.ts`                                       |
+| Subscription understanding and process isolation      | `packages/adapters/src/subscription-understanding.ts`, `subscription-media.ts`, `subscription-runtime.ts`                |
+| Server config and composition                         | `apps/api/src/config.ts`, `main.ts`                                                                                      |
+| HTTP middleware, REST/MCP and shared dispatch         | `apps/api/src/application.ts`, `rest.ts`, `mcp.ts`, `operations.ts`                                                      |
+| Owner and OAuth authentication                        | `apps/api/src/auth/`                                                                                                     |
+| HTTP client and distributable CLI                     | `packages/client`, `packages/cli`                                                                                        |
+| Release and dependency enforcement                    | `scripts/check-boundaries.ts`, `prepare-release.ts`, `.github/workflows`                                                 |
 
 ## Checks and operating constraints
 

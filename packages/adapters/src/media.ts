@@ -1,9 +1,11 @@
+import { spawn } from 'node:child_process';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   AdapterContext,
   Artifact,
   Chunk,
+  LoudnessProfile,
   MediaAdapter,
   MediaChunkKind,
 } from '@media-ingest/sdk';
@@ -122,6 +124,70 @@ export class NodeMedia implements MediaAdapter {
       )),
       durationMs: chunk.endMs - chunk.startMs,
     };
+  }
+  /** Decodes the first audio stream once and reports power per 20 ms frame. */
+  async loudness(artifact: Artifact, context: AdapterContext): Promise<LoudnessProfile> {
+    const sampleRate = 8000;
+    const frameMs = 20;
+    const frameSamples = (sampleRate * frameMs) / 1000;
+    const child = spawn(
+      this.options.ffmpegPath ?? 'ffmpeg',
+      [
+        '-nostdin',
+        '-v',
+        'error',
+        ...mediaInputPolicy,
+        '-i',
+        artifact.uri,
+        '-map',
+        '0:a:0',
+        '-vn',
+        '-ac',
+        '1',
+        '-ar',
+        String(sampleRate),
+        '-f',
+        's16le',
+        '-',
+      ],
+      {
+        signal: AbortSignal.any([
+          context.signal,
+          AbortSignal.timeout(this.options.timeoutMs ?? 15 * 60_000),
+        ]),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      },
+    );
+    const exited = new Promise<number | null>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    exited.catch(() => undefined);
+    child.stderr.resume();
+    const levels: number[] = [];
+    const full = 32768 * 32768;
+    let carry: Buffer = Buffer.alloc(0);
+    let squares = 0;
+    let samples = 0;
+    for await (const data of child.stdout as AsyncIterable<Buffer>) {
+      const buffer = carry.length ? Buffer.concat([carry, data]) : data;
+      const usable = buffer.length - (buffer.length % 2);
+      for (let offset = 0; offset < usable; offset += 2) {
+        const sample = buffer.readInt16LE(offset);
+        squares += sample * sample;
+        if (++samples === frameSamples) {
+          levels.push(squares ? 10 * Math.log10(squares / samples / full) : -Infinity);
+          squares = 0;
+          samples = 0;
+        }
+      }
+      carry = buffer.subarray(usable);
+    }
+    if (samples) levels.push(squares ? 10 * Math.log10(squares / samples / full) : -Infinity);
+    const code = await exited;
+    if (code !== 0) throw new Error('Audio level analysis failed');
+    return { frameMs, levels };
   }
   async cleanup(context: AdapterContext): Promise<void> {
     await rm(this.options.files.workspace(context), { recursive: true, force: true });
