@@ -65,6 +65,11 @@ export class GeminiProvider extends ApiProvider {
     return inspection.hasVideo ? 'video' : 'audio';
   }
 
+  /** Native video stays available for transcription as well. */
+  override sourceMedia(): 'audio' | 'video' {
+    return 'video';
+  }
+
   async process(
     artifact: Artifact,
     request: MediaRequest,

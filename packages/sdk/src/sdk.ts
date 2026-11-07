@@ -12,7 +12,7 @@ import { MemoryJobRepository } from './memory-repository.js';
 import { JobWorker } from './worker.js';
 import type { JobRecord, JobRepository, ListJobs, SdkOptions } from './ports.js';
 
-export { planChunks, aggregate } from './chunks.js';
+export { planChunks, aggregate, stitchOverlap } from './chunks.js';
 
 export class MediaSdk {
   readonly repository: JobRepository;

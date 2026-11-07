@@ -116,7 +116,12 @@ export class JobWorker {
       (await this.reuse(lease, { mediaId }, abort.signal, source))
     )
       return;
-    const artifact = await this.options.sources.materialize(source, context);
+    const audioOnly = this.options.provider.sourceMedia?.(job.request) === 'audio';
+    const artifact = await this.options.sources.materialize(
+      source,
+      context,
+      audioOnly ? { audioOnly } : undefined,
+    );
     abort.signal.throwIfAborted();
     if (!artifact.fingerprint)
       throw new MediaError('invalid_source', 'Source adapter did not supply a content fingerprint');
@@ -131,13 +136,19 @@ export class JobWorker {
       throw new MediaError('invalid_media', 'Source has no audio');
     const inputFormat =
       this.options.provider.inputFormat?.(job.request, inspection) ?? job.request.kind;
+    const chunkDurationMs = this.options.provider.chunkDurationMs(job.request);
+    // A saved plan is authoritative; analysis only shapes the first attempt's boundaries.
+    const loudness =
+      !job.plan &&
+      inspection.hasAudio &&
+      inspection.durationMs > chunkDurationMs &&
+      this.options.media.loudness
+        ? await this.options.media.loudness(artifact, context)
+        : undefined;
+    abort.signal.throwIfAborted();
     const plan =
       job.plan ??
-      planChunks(
-        inspection.durationMs,
-        this.options.provider.chunkDurationMs(job.request),
-        this.options.maxChunks,
-      );
+      planChunks(inspection.durationMs, chunkDurationMs, this.options.maxChunks, loudness);
     if (job.plan && job.plan.at(-1)?.endMs !== inspection.durationMs)
       throw new MediaError('source_changed', 'Source duration changed since the saved plan');
     await this.repository.savePlan(job.id, token, plan, artifact.fingerprint, this.now());

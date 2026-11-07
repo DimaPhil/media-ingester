@@ -19,7 +19,9 @@ export { parseChunk, parseModelJson } from './providers/shared.js';
 export { parseOpenAi } from './providers/openai.js';
 
 /** Registry members implement format selection and translation as well as chunk processing. */
-export type NodeProviderAdapter = Required<ProviderAdapter>;
+/** Overrides need every method except `sourceMedia`, whose absence keeps the full source. */
+export type NodeProviderAdapter = Required<Omit<ProviderAdapter, 'sourceMedia'>> &
+  Pick<ProviderAdapter, 'sourceMedia'>;
 
 export interface NodeProviderOptions {
   overrides?: Partial<Record<MediaRequest['provider'], NodeProviderAdapter>>;
@@ -104,6 +106,10 @@ export class NodeProviders implements NodeProviderAdapter {
 
   inputFormat(request: MediaRequest, inspection: MediaInspection) {
     return this.providers[request.provider].inputFormat(request, inspection);
+  }
+
+  sourceMedia(request: MediaRequest): 'audio' | 'video' {
+    return this.providers[request.provider].sourceMedia?.(request) ?? 'video';
   }
 
   process(artifact: Artifact, request: MediaRequest, context: AdapterContext) {

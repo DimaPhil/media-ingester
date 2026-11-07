@@ -6,7 +6,7 @@ import { NodeFiles, safeName } from '../src/files.js';
 import { NodeMedia, runCommand } from '../src/media.js';
 import { NodeSources } from '../src/sources.js';
 import { z } from 'zod';
-import { MediaSdk } from '@media-ingest/sdk';
+import { MediaSdk, planChunks } from '@media-ingest/sdk';
 
 const roots: string[] = [];
 async function setup() {
@@ -381,6 +381,45 @@ describe('ffmpeg adapter', () => {
     const audioInspection = await media.inspect(audio, context);
     expect(audioInspection.hasVideo).toBe(false);
     expect(audioInspection.hasAudio).toBe(true);
+  });
+
+  it('measures pauses in real audio so the planner cuts between words', async () => {
+    const { root, files, context } = await setup();
+    const path = join(root, 'speech-like.wav');
+    // Tone, 0.6 s of digital silence, tone: a stand-in for two phrases and a pause.
+    await runCommand(
+      'ffmpeg',
+      [
+        '-nostdin',
+        '-v',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        "aevalsrc='if(between(t,1.2,1.8),0,0.5*sin(2*PI*440*t))':s=16000:d=3",
+        '-y',
+        path,
+      ],
+      context.signal,
+    );
+    const artifact = await files.artifact(path, 'speech-like.wav', 'audio/wav');
+    const loudness = await new NodeMedia({ files }).loudness(artifact, context);
+    expect(loudness.frameMs).toBe(20);
+    expect(loudness.levels.length).toBe(150);
+    expect(loudness.levels[30]).toBeGreaterThan(-12);
+    expect(loudness.levels[75]).toBe(-Infinity);
+    const plan = planChunks(3000, 2000, 10, loudness);
+    expect(plan[0]!.endMs).toBeGreaterThanOrEqual(1350);
+    expect(plan[0]!.endMs).toBeLessThanOrEqual(1650);
+    expect(plan[0]).not.toHaveProperty('keepEndMs');
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      new NodeMedia({ files }).loudness(artifact, { ...context, signal: controller.signal }),
+    ).rejects.toThrow();
+    await expect(
+      new NodeMedia({ files }).loudness({ ...artifact, uri: join(root, 'missing.wav') }, context),
+    ).rejects.toThrow('analysis failed');
   });
 
   it('probes and chunks real generated media', async () => {
