@@ -42,6 +42,7 @@ const sources = new NodeSources({
 const provider = new NodeProviders({
   openaiApiKey: config.OPENAI_API_KEY,
   geminiApiKey: config.GEMINI_API_KEY,
+  geminiYoutubeUrls: config.MEDIA_GEMINI_YOUTUBE_URLS,
   googleCredentials: credentials,
   googleProject: config.GOOGLE_PROJECT_ID,
   googleRecognizer: config.GOOGLE_SPEECH_RECOGNIZER,

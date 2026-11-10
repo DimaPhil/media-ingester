@@ -1,9 +1,28 @@
 import { resultSchema, type ResolvedSource } from '@media-ingest/contracts';
 import { findReusableResult, RESULT_CACHE_CANDIDATES } from './cache.js';
-import { aggregate, planChunks, validateChunk } from './chunks.js';
+import { aggregate, NO_PAUSES, planChunks, validateChunk } from './chunks.js';
 import { synthesisParts, synthesizeWhole } from './synthesis.js';
 import { MediaError, LeaseLostError } from './errors.js';
-import type { AdapterContext, JobRepository, Lease, ResultLookup, SdkOptions } from './ports.js';
+import type {
+  AdapterContext,
+  Chunk,
+  ChunkOutput,
+  JobRepository,
+  Lease,
+  LoudnessProfile,
+  MediaInspection,
+  ResultLookup,
+  SdkOptions,
+} from './ports.js';
+
+/** Everything the chunk loop needs, whether the provider reads local or remote media. */
+interface Prepared {
+  fingerprint: string;
+  inspection: MediaInspection;
+  loudness?: LoudnessProfile;
+  sizeBytes?: number;
+  run(chunk: Chunk): Promise<ChunkOutput>;
+}
 
 export class JobWorker {
   private readonly concurrency: number;
@@ -117,42 +136,22 @@ export class JobWorker {
       (await this.reuse(lease, { mediaId }, abort.signal, source))
     )
       return;
-    const audioOnly = this.options.provider.sourceMedia?.(job.request) === 'audio';
-    const artifact = await this.options.sources.materialize(
-      source,
-      context,
-      audioOnly ? { audioOnly } : undefined,
-    );
+    const prepared =
+      this.remote(lease, source, context) ?? (await this.local(lease, source, context, abort));
+    if (!prepared) return;
     abort.signal.throwIfAborted();
-    if (!artifact.fingerprint)
-      throw new MediaError('invalid_source', 'Source adapter did not supply a content fingerprint');
-    if (job.sourceFingerprint !== null && job.sourceFingerprint !== artifact.fingerprint)
-      throw new MediaError(
-        'source_changed',
-        'Source bytes changed since the saved chunks; submit a new job',
-      );
-    if (await this.reuse(lease, { fingerprint: artifact.fingerprint }, abort.signal)) return;
-    const inspection = await this.options.media.inspect(artifact, context);
-    if (job.request.kind === 'transcription' && !inspection.hasAudio)
-      throw new MediaError('invalid_media', 'Source has no audio');
-    const inputFormat =
-      this.options.provider.inputFormat?.(job.request, inspection) ?? job.request.kind;
-    const chunkDurationMs = this.options.provider.chunkDurationMs(job.request);
-    // A saved plan is authoritative; analysis only shapes the first attempt's boundaries.
-    const loudness =
-      !job.plan &&
-      inspection.hasAudio &&
-      inspection.durationMs > chunkDurationMs &&
-      this.options.media.loudness
-        ? await this.options.media.loudness(artifact, context)
-        : undefined;
-    abort.signal.throwIfAborted();
+    const { inspection } = prepared;
     const plan =
       job.plan ??
-      planChunks(inspection.durationMs, chunkDurationMs, this.options.maxChunks, loudness);
+      planChunks(
+        inspection.durationMs,
+        this.options.provider.chunkDurationMs(job.request),
+        this.options.maxChunks,
+        prepared.loudness,
+      );
     if (job.plan && job.plan.at(-1)?.endMs !== inspection.durationMs)
       throw new MediaError('source_changed', 'Source duration changed since the saved plan');
-    await this.repository.savePlan(job.id, token, plan, artifact.fingerprint, this.now());
+    await this.repository.savePlan(job.id, token, plan, prepared.fingerprint, this.now());
     let cursor = 0;
     const pending = plan.filter((chunk) => !job.chunks[String(chunk.index)]);
     const runners = Array.from({ length: Math.min(this.concurrency, pending.length) }, async () => {
@@ -160,9 +159,7 @@ export class JobWorker {
         abort.signal.throwIfAborted();
         const chunk = pending[cursor++];
         if (!chunk) break;
-        const media = await this.options.media.chunk(artifact, chunk, inputFormat, context);
-        abort.signal.throwIfAborted();
-        const output = await this.options.provider.process(media, job.request, context);
+        const output = await prepared.run(chunk);
         abort.signal.throwIfAborted();
         const validated = validateChunk(output, job.request, chunk);
         await this.repository.saveChunk(job.id, token, chunk.index, validated, this.now());
@@ -201,8 +198,90 @@ export class JobWorker {
     await this.repository.complete(job.id, token, resultSchema.parse(result), this.now(), {
       source,
       inspection,
-      ...(artifact.sizeBytes === undefined ? {} : { sizeBytes: artifact.sizeBytes }),
+      ...(prepared.sizeBytes === undefined ? {} : { sizeBytes: prepared.sizeBytes }),
     });
+  }
+
+  /**
+   * Media the provider reads from its site without download or local processing. The site ID
+   * is the identity; boundaries overlap because the audio cannot be measured.
+   */
+  private remote(
+    { job }: Lease,
+    source: ResolvedSource,
+    context: AdapterContext,
+  ): Prepared | undefined {
+    const { provider } = this.options;
+    const mediaId = source.metadata.mediaId;
+    if (typeof mediaId !== 'string' || !mediaId || !provider.processRemote) return undefined;
+    const remote = provider.remoteMedia?.(job.request, source);
+    if (!remote) return undefined;
+    if (!Number.isFinite(remote.durationMs) || remote.durationMs <= 0)
+      throw new MediaError('invalid_source', 'Remote media needs a positive duration');
+    const site =
+      typeof source.metadata.downloadProvider === 'string' ? source.metadata.downloadProvider : '';
+    const fingerprint = `remote:${source.source.kind}:${site}:${mediaId}`;
+    if (job.sourceFingerprint !== null && job.sourceFingerprint !== fingerprint)
+      throw new MediaError(
+        'source_changed',
+        'Source changed since the saved chunks; submit a new job',
+      );
+    return {
+      fingerprint,
+      inspection: { durationMs: remote.durationMs, hasAudio: true, hasVideo: true },
+      ...(job.plan ? {} : { loudness: NO_PAUSES }),
+      run: (chunk) => provider.processRemote!(remote, chunk, job.request, context),
+    };
+  }
+
+  /** Downloads and inspects the source; returns undefined when a retained result completed the job. */
+  private async local(
+    lease: Lease,
+    source: ResolvedSource,
+    context: AdapterContext,
+    abort: AbortController,
+  ): Promise<Prepared | undefined> {
+    const { job } = lease;
+    const audioOnly = this.options.provider.sourceMedia?.(job.request) === 'audio';
+    const artifact = await this.options.sources.materialize(
+      source,
+      context,
+      audioOnly ? { audioOnly } : undefined,
+    );
+    abort.signal.throwIfAborted();
+    if (!artifact.fingerprint)
+      throw new MediaError('invalid_source', 'Source adapter did not supply a content fingerprint');
+    if (job.sourceFingerprint !== null && job.sourceFingerprint !== artifact.fingerprint)
+      throw new MediaError(
+        'source_changed',
+        'Source bytes changed since the saved chunks; submit a new job',
+      );
+    if (await this.reuse(lease, { fingerprint: artifact.fingerprint }, abort.signal))
+      return undefined;
+    const inspection = await this.options.media.inspect(artifact, context);
+    if (job.request.kind === 'transcription' && !inspection.hasAudio)
+      throw new MediaError('invalid_media', 'Source has no audio');
+    const inputFormat =
+      this.options.provider.inputFormat?.(job.request, inspection) ?? job.request.kind;
+    // A saved plan is authoritative; analysis only shapes the first attempt's boundaries.
+    const loudness =
+      !job.plan &&
+      inspection.hasAudio &&
+      inspection.durationMs > this.options.provider.chunkDurationMs(job.request) &&
+      this.options.media.loudness
+        ? await this.options.media.loudness(artifact, context)
+        : undefined;
+    return {
+      fingerprint: artifact.fingerprint,
+      inspection,
+      ...(loudness ? { loudness } : {}),
+      ...(artifact.sizeBytes === undefined ? {} : { sizeBytes: artifact.sizeBytes }),
+      run: async (chunk) => {
+        const media = await this.options.media.chunk(artifact, chunk, inputFormat, context);
+        abort.signal.throwIfAborted();
+        return this.options.provider.process(media, job.request, context);
+      },
+    };
   }
 
   /** Completes the job with an equivalent retained result unless the request forces a fresh run. */

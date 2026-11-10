@@ -1,10 +1,13 @@
-import type { MediaRequest } from '@media-ingest/contracts';
-import type {
-  AdapterContext,
-  Artifact,
-  MediaInspection,
-  ProviderAdapter,
-  SynthesisInput,
+import type { MediaRequest, ResolvedSource } from '@media-ingest/contracts';
+import {
+  MediaError,
+  type AdapterContext,
+  type Artifact,
+  type Chunk,
+  type MediaInspection,
+  type ProviderAdapter,
+  type RemoteMedia,
+  type SynthesisInput,
 } from '@media-ingest/sdk';
 import { ClaudeCodeProvider } from './providers/claude-code.js';
 import { CodexProvider } from './providers/codex.js';
@@ -25,14 +28,17 @@ export { parseChunk, parseModelJson } from './providers/shared.js';
 export { parseOpenAi } from './providers/openai.js';
 
 /** Registry members implement format selection and translation as well as chunk processing. */
-/** Overrides need every method except `sourceMedia`, whose absence keeps the full source. */
-export type NodeProviderAdapter = Required<Omit<ProviderAdapter, 'sourceMedia' | 'synthesize'>> &
-  Pick<ProviderAdapter, 'sourceMedia' | 'synthesize'>;
+/** Optional capabilities; an override without them keeps the default download-and-concatenate path. */
+type OptionalCapability = 'sourceMedia' | 'synthesize' | 'remoteMedia' | 'processRemote';
+export type NodeProviderAdapter = Required<Omit<ProviderAdapter, OptionalCapability>> &
+  Pick<ProviderAdapter, OptionalCapability>;
 
 export interface NodeProviderOptions {
   overrides?: Partial<Record<MediaRequest['provider'], NodeProviderAdapter>>;
   openaiApiKey?: string;
   geminiApiKey?: string;
+  /** Let Gemini read public YouTube videos itself instead of downloading them. Default true. */
+  geminiYoutubeUrls?: boolean;
   googleCredentials?: Record<string, unknown>;
   googleProject?: string;
   googleRecognizer?: string;
@@ -74,6 +80,7 @@ export class NodeProviders implements NodeProviderAdapter {
       transcriptionModel: models?.geminiTranscription,
       understandingModel: models?.geminiUnderstanding,
       translationModel: models?.translation,
+      youtubeUrls: options.geminiYoutubeUrls,
       timeoutMs,
     };
     const translate = gemini.apiKey
@@ -120,6 +127,22 @@ export class NodeProviders implements NodeProviderAdapter {
 
   process(artifact: Artifact, request: MediaRequest, context: AdapterContext) {
     return this.providers[request.provider].process(artifact, request, context);
+  }
+
+  remoteMedia(request: MediaRequest, source: ResolvedSource): RemoteMedia | null {
+    return this.providers[request.provider].remoteMedia?.(request, source) ?? null;
+  }
+
+  async processRemote(
+    media: RemoteMedia,
+    chunk: Chunk,
+    request: MediaRequest,
+    context: AdapterContext,
+  ) {
+    const provider = this.providers[request.provider];
+    if (!provider.processRemote)
+      throw new MediaError('invalid_request', 'Provider cannot read remote media');
+    return provider.processRemote(media, chunk, request, context);
   }
 
   async synthesize(input: SynthesisInput, request: MediaRequest, context: AdapterContext) {

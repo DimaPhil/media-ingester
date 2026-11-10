@@ -143,6 +143,18 @@ export interface ProviderAdapter {
   chunkDurationMs(request: MediaRequest): number;
   /** Select the representation supplied to this provider. Omission preserves request-kind behavior. */
   inputFormat?(request: MediaRequest, inspection: MediaInspection): MediaInputFormat;
+  /**
+   * Media the provider can read straight from the source site, skipping download and local
+   * processing. Requires a site media ID; null keeps the download path.
+   */
+  remoteMedia?(request: MediaRequest, source: ResolvedSource): RemoteMedia | null;
+  /** Processes one chunk of remote media; timestamps are relative to the chunk start. */
+  processRemote?(
+    media: RemoteMedia,
+    chunk: Chunk,
+    request: MediaRequest,
+    context: AdapterContext,
+  ): Promise<ChunkOutput>;
   /** Streams this provider reads from the source. `audio` lets sources skip video bytes. */
   sourceMedia?(request: MediaRequest): 'audio' | 'video';
   process(artifact: Artifact, request: MediaRequest, context: AdapterContext): Promise<ChunkOutput>;
@@ -156,6 +168,11 @@ export interface ProviderAdapter {
     context: AdapterContext,
   ): Promise<SynthesisOutput | null>;
   translate?(text: string, request: MediaRequest, context: AdapterContext): Promise<string>;
+}
+export interface RemoteMedia {
+  /** Canonical address the provider fetches. */
+  uri: string;
+  durationMs: number;
 }
 /** One analysis placed on the media timeline. Timestamps are absolute milliseconds. */
 export interface SynthesisPart {

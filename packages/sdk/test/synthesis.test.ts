@@ -146,3 +146,99 @@ describe('whole-media synthesis', () => {
     );
   });
 });
+
+describe('remote media', () => {
+  function remoteFixture(remote: boolean) {
+    const repository = new MemoryJobRepository();
+    const sources = {
+      resolve: vi.fn(async (source: MediaRequest['source']) => ({
+        source,
+        fileName: 'v',
+        metadata: { mediaId: 'abcdefghijk', downloadProvider: 'youtube' },
+      })),
+      materialize: vi.fn(async () => ({ uri: 'local', fileName: 'v', fingerprint: 'bytes' })),
+    };
+    const media = {
+      inspect: vi.fn(async () => ({ durationMs: 2_500, hasAudio: true, hasVideo: true })),
+      chunk: vi.fn(async () => ({ uri: 'chunk', fileName: 'chunk', fingerprint: 'c' })),
+      cleanup: vi.fn(async () => {}),
+    };
+    const processRemote = vi.fn(
+      async (_media: unknown, chunk: { index: number }): Promise<ChunkOutput> => ({
+        text: `remote ${chunk.index}`,
+        segments: [],
+        timeRanges: [],
+        detectedLanguage: null,
+      }),
+    );
+    const provider: ProviderAdapter = {
+      resolveModel: () => 'm',
+      chunkDurationMs: () => 1_000,
+      process: vi.fn(async () => ({
+        text: 'local',
+        segments: [],
+        timeRanges: [],
+        detectedLanguage: null,
+      })),
+      remoteMedia: () => (remote ? { uri: 'https://site/abcdefghijk', durationMs: 2_500 } : null),
+      processRemote,
+    };
+    const sdk = new MediaSdk({ repository, sources, media, provider });
+    return { sdk, repository, sources, media, provider, processRemote };
+  }
+  const youtube: MediaRequest = {
+    kind: 'transcription',
+    source: { kind: 'youtube', uri: 'https://youtube.com/watch?v=abcdefghijk' },
+    provider: 'google-gemini',
+  };
+
+  it('processes remote media without download, inspection or local chunks, overlapping boundaries', async () => {
+    const { sdk, repository, sources, media, processRemote } = remoteFixture(true);
+    const job = await sdk.submit('alice', youtube);
+    await sdk.runNext();
+    const done = await sdk.get('alice', job.id);
+    expect(done.status).toBe('completed');
+    expect(sources.materialize).not.toHaveBeenCalled();
+    expect(media.inspect).not.toHaveBeenCalled();
+    expect(media.chunk).not.toHaveBeenCalled();
+    const record = await repository.get('alice', job.id);
+    expect(record?.sourceFingerprint).toBe('remote:youtube:youtube:abcdefghijk');
+    expect(record?.plan?.[0]).toMatchObject({ startMs: 0, endMs: 1_000, keepEndMs: 875 });
+    expect(processRemote.mock.calls.map((call) => call[1])).toEqual(record?.plan);
+    expect(processRemote.mock.calls[0]![0]).toEqual({
+      uri: 'https://site/abcdefghijk',
+      durationMs: 2_500,
+    });
+    expect(done.result?.text).toBe('remote 0 remote 1 remote 2');
+  });
+
+  it('keeps the download path when the provider declines and rejects a changed identity', async () => {
+    const declined = remoteFixture(false);
+    await declined.sdk.submit('alice', youtube);
+    await declined.sdk.runNext();
+    expect(declined.sources.materialize).toHaveBeenCalledOnce();
+    expect(declined.processRemote).not.toHaveBeenCalled();
+
+    // A download-path attempt saved byte checkpoints; a remote retry must not mix identities.
+    let remote = false;
+    const changed = remoteFixture(true);
+    changed.provider.remoteMedia = () =>
+      remote ? { uri: 'https://site/abcdefghijk', durationMs: 2_500 } : null;
+    vi.mocked(changed.provider.process).mockRejectedValueOnce(new Error('local failure'));
+    const job = await changed.sdk.submit('alice', youtube);
+    await changed.sdk.runNext();
+    expect((await changed.repository.get('alice', job.id))?.sourceFingerprint).toBe('bytes');
+    remote = true;
+    await changed.sdk.retry('alice', job.id);
+    await changed.sdk.runNext();
+    expect((await changed.sdk.get('alice', job.id)).error?.code).toBe('source_changed');
+  });
+
+  it('rejects remote media without a usable duration', async () => {
+    const { sdk, provider } = remoteFixture(true);
+    provider.remoteMedia = () => ({ uri: 'u', durationMs: 0 });
+    const job = await sdk.submit('alice', youtube);
+    await sdk.runNext();
+    expect((await sdk.get('alice', job.id)).error?.code).toBe('invalid_source');
+  });
+});

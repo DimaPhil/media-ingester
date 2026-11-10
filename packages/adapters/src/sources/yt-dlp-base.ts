@@ -71,6 +71,11 @@ export abstract class YtDlpSourceBase extends DownloadSource<YtDlpOptions> {
       ext?: string;
       _type?: string;
       entries?: unknown;
+      duration?: number;
+      availability?: string;
+      age_limit?: number;
+      is_live?: boolean;
+      live_status?: string;
     };
     if (['playlist', 'multi_video'].includes(data._type ?? '') || data.entries !== undefined)
       throw new MediaError(
@@ -84,6 +89,19 @@ export abstract class YtDlpSourceBase extends DownloadSource<YtDlpOptions> {
         downloadProvider: siteId,
         ...(typeof data.id === 'string' ? { mediaId: data.id } : {}),
         ...(data.title ? { title: data.title } : {}),
+        // Site facts that let a provider read the media remotely; absent values disable that.
+        ...(typeof data.duration === 'number' && data.duration > 0
+          ? { durationMs: Math.round(data.duration * 1000) }
+          : {}),
+        ...(typeof data.availability === 'string' ? { availability: data.availability } : {}),
+        ...(typeof data.age_limit === 'number' ? { ageLimit: data.age_limit } : {}),
+        ...(typeof data.live_status === 'string' || typeof data.is_live === 'boolean'
+          ? {
+              live:
+                data.is_live === true ||
+                !['not_live', 'was_live'].includes(data.live_status ?? 'not_live'),
+            }
+          : {}),
       },
     };
   }
