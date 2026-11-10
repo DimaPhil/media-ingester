@@ -21,6 +21,7 @@ import {
   subscriptionEnvironment,
   runSubscriptionProcess,
   withCredentialLock,
+  acquireCredentialLock,
   validateCredentialHome,
 } from '../src/subscription-runtime.js';
 it('excludes API keys, custom providers, proxies, and inherited hooks from CLI environment', () => {
@@ -62,6 +63,24 @@ it('never overlaps concurrent credential holders', async () => {
   } finally {
     release();
     await first;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+it('releases an early-released lock once, never removing the next holder', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'credential-test-')));
+  const signal = new AbortController().signal;
+  try {
+    const release = await acquireCredentialLock(home, signal);
+    const next = acquireCredentialLock(home, signal);
+    await delay(150);
+    await release();
+    const releaseNext = await next;
+    // A repeated release from the first holder must leave the second holder's lock in place.
+    await release();
+    expect((await stat(join(home, '.media-subscription.lock'))).isDirectory()).toBe(true);
+    await releaseNext();
+    await expect(stat(join(home, '.media-subscription.lock'))).rejects.toThrow();
+  } finally {
     await rm(home, { recursive: true, force: true });
   }
 });

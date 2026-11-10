@@ -11,7 +11,7 @@ import {
   type ChunkOutput,
 } from '@media-ingest/sdk';
 import {
-  withCredentialLock,
+  acquireCredentialLock,
   subscriptionEnvironment,
   runSubscriptionProcess,
 } from './subscription-runtime.js';
@@ -86,7 +86,10 @@ export async function transcribeCodexAudio(
     const peaks = [...stats.stdout.matchAll(/^lavfi\.astats\.Overall\.Peak_level=(.+)$/gm)];
     if (peaks.length && peaks.every((match) => match[1]?.trim() === '-inf'))
       return { text: '', segments: [], timeRanges: [], detectedLanguage: null };
-    return await withCredentialLock(options.codexHome, context.signal, async () => {
+    // Native login refresh happens while a client starts. Once the realtime session is connected,
+    // other chunks may start their own sessions, so the lock covers startup only.
+    const release = await acquireCredentialLock(options.codexHome, context.signal);
+    try {
       const version = await runSubscriptionProcess(codex, ['--version'], {
         cwd: workspace,
         env,
@@ -98,12 +101,16 @@ export async function transcribeCodexAudio(
           'subscription_configuration',
           'Experimental audio requires codex-cli 0.163.0',
         );
-      const output = await streamAudio(artifact, context, options, workspace, env, durationMs);
+      const output = await streamAudio(artifact, context, options, workspace, env, durationMs, {
+        connected: () => void release(),
+      });
       return {
         ...output,
         provenance: { transcription: { provider: 'codex', protocol: 'realtime-v3', model: null } },
       };
-    });
+    } finally {
+      await release();
+    }
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

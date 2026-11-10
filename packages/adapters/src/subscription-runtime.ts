@@ -66,6 +66,22 @@ export async function withCredentialLock<T>(
   signal: AbortSignal,
   fn: () => Promise<T>,
 ): Promise<T> {
+  const release = await acquireCredentialLock(home, signal);
+  try {
+    return await fn();
+  } finally {
+    await release();
+  }
+}
+
+/**
+ * Acquires the credential lock and returns an idempotent release, for callers that need the
+ * lock only while a native client authenticates rather than for its whole session.
+ */
+export async function acquireCredentialLock(
+  home: string,
+  signal: AbortSignal,
+): Promise<() => Promise<void>> {
   const canonical = await validateCredentialHome(home);
   const lock = join(canonical, '.media-subscription.lock');
   const waitDeadline = Date.now() + 600_000;
@@ -110,6 +126,8 @@ export async function withCredentialLock<T>(
       await delay(100, undefined, { signal });
     }
   }
+  let released: Promise<void> | undefined;
+  const release = () => (released ??= rm(lock, { recursive: true, force: true }));
   try {
     await writeFile(
       join(lock, 'owner.json'),
@@ -117,10 +135,11 @@ export async function withCredentialLock<T>(
       { flag: 'wx', mode: 0o600 },
     );
     signal.throwIfAborted();
-    return await fn();
-  } finally {
-    await rm(lock, { recursive: true, force: true });
+  } catch (error) {
+    await release();
+    throw error;
   }
+  return release;
 }
 
 export interface SubscriptionProcessOptions {
