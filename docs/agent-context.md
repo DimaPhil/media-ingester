@@ -14,7 +14,8 @@ Use [architecture](architecture.md) for invariants and class hierarchies, [accep
 - Subscription understanding prepares timestamped frames and, when audio exists, a Codex realtime transcript before starting Codex or Claude. Both are supplied in the initial agent context. Silent video uses frames without ASR. Claude is not labeled as the transcription provider.
 - Use dedicated persistent writable CLI credential homes and native login. Do not copy a host's agent home or bake credentials into images. Remove inherited API-key overrides; no private credential parsing or direct token reuse.
 - Chunk boundaries fall in measured pauses; without one, neighbors overlap and aggregation stitches them. Saved plans stay authoritative. Audio-only providers download audio-only formats. See [ADR 0009](adr/0009-pause-aligned-chunks.md).
-- Exactly silent decoded audio skips subscription ASR. Check for all-zero samples before attributing a transcript to Codex. Missing ASR output on nonzero audio remains an error.
+- Exactly silent decoded audio skips subscription ASR. Check for all-zero samples before attributing a transcript to Codex. On nonzero audio, an empty transcript is valid only when Codex opened no speech turn; missing words after a turn remain an error. Codex ASR holds the credential lock only until its session connects. See [ADR 0012](adr/0012-parallel-codex-asr.md).
+- Multi-chunk understanding ends with one whole-media synthesis call ([ADR 0010](adr/0010-whole-media-synthesis.md)). Gemini reads public YouTube videos by URL, identified by site media ID ([ADR 0011](adr/0011-gemini-youtube-urls.md)).
 
 ```mermaid
 flowchart LR
