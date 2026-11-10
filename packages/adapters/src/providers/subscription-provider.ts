@@ -6,8 +6,10 @@ import {
   type MediaInputFormat,
   type MediaInspection,
   type ProviderAdapter,
+  type SynthesisInput,
 } from '@media-ingest/sdk';
 import {
+  synthesizeSubscription,
   translateSubscription,
   understandSubscription,
   type SubscriptionUnderstandingOptions,
@@ -53,6 +55,11 @@ export abstract class SubscriptionProvider implements ProviderAdapter {
     if (request.kind !== 'understanding')
       throw new MediaError('invalid_request', 'This provider requires an understanding request');
     return understandSubscription(artifact, request, context, this.subscription, this.reasoner);
+  }
+
+  async synthesize(input: SynthesisInput, request: MediaRequest, context: AdapterContext) {
+    assertSelectedProvider(request, this.reasoner.provider);
+    return synthesizeSubscription(input, request, context, this.subscription, this.reasoner);
   }
 
   async translate(text: string, request: MediaRequest, context: AdapterContext): Promise<string> {

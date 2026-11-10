@@ -1,6 +1,7 @@
 import { resultSchema, type ResolvedSource } from '@media-ingest/contracts';
 import { findReusableResult, RESULT_CACHE_CANDIDATES } from './cache.js';
 import { aggregate, planChunks, validateChunk } from './chunks.js';
+import { synthesisParts, synthesizeWhole } from './synthesis.js';
 import { MediaError, LeaseLostError } from './errors.js';
 import type { AdapterContext, JobRepository, Lease, ResultLookup, SdkOptions } from './ports.js';
 
@@ -172,6 +173,21 @@ export class JobWorker {
     await Promise.all(runners.map((runner) => runner.catch((error) => abort.abort(error))));
     abort.signal.throwIfAborted();
     const result = aggregate(plan, job.chunks, job.request);
+    if (job.request.kind === 'understanding' && plan.length > 1) {
+      // Chunk answers see only their span; one more call answers the task for the whole media.
+      const whole = await synthesizeWhole(
+        this.options.provider,
+        synthesisParts(plan, job.chunks),
+        inspection.durationMs,
+        job.request,
+        context,
+      );
+      abort.signal.throwIfAborted();
+      if (whole) {
+        result.text = whole.text;
+        result.timeRanges = whole.timeRanges;
+      }
+    }
     if (job.request.targetLanguage) {
       if (!this.options.provider.translate)
         throw new MediaError('unsupported_translation', 'Provider does not support translation');

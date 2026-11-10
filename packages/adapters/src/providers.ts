@@ -1,5 +1,11 @@
 import type { MediaRequest } from '@media-ingest/contracts';
-import type { AdapterContext, Artifact, MediaInspection, ProviderAdapter } from '@media-ingest/sdk';
+import type {
+  AdapterContext,
+  Artifact,
+  MediaInspection,
+  ProviderAdapter,
+  SynthesisInput,
+} from '@media-ingest/sdk';
 import { ClaudeCodeProvider } from './providers/claude-code.js';
 import { CodexProvider } from './providers/codex.js';
 import { GeminiProvider } from './providers/gemini.js';
@@ -20,8 +26,8 @@ export { parseOpenAi } from './providers/openai.js';
 
 /** Registry members implement format selection and translation as well as chunk processing. */
 /** Overrides need every method except `sourceMedia`, whose absence keeps the full source. */
-export type NodeProviderAdapter = Required<Omit<ProviderAdapter, 'sourceMedia'>> &
-  Pick<ProviderAdapter, 'sourceMedia'>;
+export type NodeProviderAdapter = Required<Omit<ProviderAdapter, 'sourceMedia' | 'synthesize'>> &
+  Pick<ProviderAdapter, 'sourceMedia' | 'synthesize'>;
 
 export interface NodeProviderOptions {
   overrides?: Partial<Record<MediaRequest['provider'], NodeProviderAdapter>>;
@@ -114,6 +120,10 @@ export class NodeProviders implements NodeProviderAdapter {
 
   process(artifact: Artifact, request: MediaRequest, context: AdapterContext) {
     return this.providers[request.provider].process(artifact, request, context);
+  }
+
+  async synthesize(input: SynthesisInput, request: MediaRequest, context: AdapterContext) {
+    return (await this.providers[request.provider].synthesize?.(input, request, context)) ?? null;
   }
 
   translate(text: string, request: MediaRequest, context: AdapterContext) {

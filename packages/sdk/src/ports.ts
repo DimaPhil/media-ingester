@@ -146,7 +146,36 @@ export interface ProviderAdapter {
   /** Streams this provider reads from the source. `audio` lets sources skip video bytes. */
   sourceMedia?(request: MediaRequest): 'audio' | 'video';
   process(artifact: Artifact, request: MediaRequest, context: AdapterContext): Promise<ChunkOutput>;
+  /**
+   * Combines per-chunk understanding into one answer for a span. Returns null when the provider
+   * cannot synthesize, which keeps the concatenated chunk answers.
+   */
+  synthesize?(
+    input: SynthesisInput,
+    request: MediaRequest,
+    context: AdapterContext,
+  ): Promise<SynthesisOutput | null>;
   translate?(text: string, request: MediaRequest, context: AdapterContext): Promise<string>;
+}
+/** One analysis placed on the media timeline. Timestamps are absolute milliseconds. */
+export interface SynthesisPart {
+  startMs: number;
+  endMs: number;
+  text: string;
+  timeRanges: MediaResult['timeRanges'];
+}
+export interface SynthesisInput {
+  durationMs: number;
+  /** Span covered by `parts`; the whole media when `final` is true. */
+  startMs: number;
+  endMs: number;
+  parts: SynthesisPart[];
+  /** False for an intermediate level that a later call combines further. */
+  final: boolean;
+}
+export interface SynthesisOutput {
+  text: string;
+  timeRanges: MediaResult['timeRanges'];
 }
 export interface SdkOptions {
   repository?: JobRepository;

@@ -7,9 +7,19 @@ import type {
   ChunkOutput,
   MediaInputFormat,
   MediaInspection,
+  SynthesisInput,
+  SynthesisOutput,
 } from '@media-ingest/sdk';
 import { ApiProvider } from './api-provider.js';
-import { checked, key, parseChunk, parseModelJson, parseTranslation } from './shared.js';
+import {
+  checked,
+  key,
+  parseChunk,
+  parseModelJson,
+  parseSynthesis,
+  parseTranslation,
+  synthesisPrompt,
+} from './shared.js';
 
 interface GeminiFile {
   name: string;
@@ -68,6 +78,21 @@ export class GeminiProvider extends ApiProvider {
   /** Native video stays available for transcription as well. */
   override sourceMedia(): 'audio' | 'video' {
     return 'video';
+  }
+
+  /** Text-only call with the understanding model over the span analyses. */
+  async synthesize(
+    input: SynthesisInput,
+    request: MediaRequest,
+    context: AdapterContext,
+  ): Promise<SynthesisOutput> {
+    const text = await generateGemini(
+      this.resolveModel(request),
+      key(this.options.apiKey, 'GEMINI_API_KEY'),
+      [{ text: synthesisPrompt(input, request) }],
+      this.signal(context),
+    );
+    return parseSynthesis(parseModelJson(text));
   }
 
   async process(

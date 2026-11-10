@@ -20,6 +20,7 @@ vi.mock('../src/subscription-runtime.js', () => ({
     args[0] === 'auth' ? mocks.auth(binary, args, options) : mocks.process(binary, args, options),
 }));
 import {
+  synthesizeSubscription,
   understandSubscription,
   translateSubscription,
 } from '../src/subscription-understanding.js';
@@ -222,6 +223,51 @@ describe('subscription understanding', () => {
       ),
     ).rejects.toThrow('successful structured output');
   });
+  it('synthesizes span analyses with the selected agent and no media or ASR', async () => {
+    mocks.process.mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        structured_output: {
+          text: 'Span answer',
+          timeRanges: [{ startMs: 70_000, endMs: 71_000, label: null }],
+        },
+      }),
+      stderr: '',
+    });
+    const input = {
+      durationMs: 300_000,
+      startMs: 60_000,
+      endMs: 180_000,
+      final: false,
+      parts: [{ startMs: 60_000, endMs: 120_000, text: 'First', timeRanges: [] }],
+    };
+    expect(
+      await synthesizeSubscription(
+        input,
+        { ...request, provider: 'claude-code' },
+        context,
+        options,
+        claude,
+      ),
+    ).toEqual({ text: 'Span answer', timeRanges: [{ startMs: 70_000, endMs: 71_000 }] });
+    const args = mocks.process.mock.calls[0]![1] as string[];
+    expect(args).toContain('chosen-model');
+    const stdin = (mocks.process.mock.calls[0]![2] as { input: string }).input;
+    expect(stdin).toContain('A later step combines spans');
+    expect(stdin).toContain('within 60000 to 180000');
+    expect(mocks.transcribe).not.toHaveBeenCalled();
+    expect(mocks.command).not.toHaveBeenCalled();
+    await expect(
+      synthesizeSubscription(
+        input,
+        { ...request, provider: 'claude-code' },
+        context,
+        options,
+        codex,
+      ),
+    ).rejects.toThrow('Mismatched');
+  });
+
   it('translates with the same selected subscription model', async () => {
     mocks.process.mockResolvedValue({
       stdout: '{"type":"result","structured_output":{"text":"Translated"}}',
