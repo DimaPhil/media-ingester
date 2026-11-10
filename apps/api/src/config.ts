@@ -30,6 +30,10 @@ const schema = z.object({
     .default(1024 * 1024 * 1024),
   OPENAI_API_KEY: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
+  MEDIA_GEMINI_YOUTUBE_URLS: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),
   GOOGLE_PROJECT_ID: z.string().optional(),
   GOOGLE_SPEECH_RECOGNIZER: z.string().optional(),

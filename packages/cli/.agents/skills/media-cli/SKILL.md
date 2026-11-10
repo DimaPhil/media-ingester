@@ -19,7 +19,7 @@ Completed and failed execution records expire after 30 days, while successful ou
 
 Choose the provider explicitly when subscription usage matters. `codex` supports transcription and understanding; `claude-code` supports understanding only. Both understanding paths finish Codex subscription transcription first and provide it together with timestamped frames in the agent's initial context. Do not request a second transcription from Claude. Silent videos use frames only. Neither subscription path falls back to paid APIs; native login and usage-limit failures require operator action or an explicitly chosen alternative.
 
-Codex audio uses an experimental realtime route with paced playback and silence-based completion. Do not claim native video input, exact word timing, or universal transcription accuracy. Inspect result provenance: `codex-realtime-v3` identifies the ASR route, not the underlying model; its backend model remains unknown. Understanding sees sampled frames, so events between frames may be missed.
+Codex audio uses an experimental realtime route with paced playback and silence-based completion. Do not claim native video input, exact word timing, or universal transcription accuracy. Inspect result provenance: `codex-realtime-v3` identifies the ASR route, not the underlying model; its backend model remains unknown. Understanding sees sampled frames, so events between frames may be missed. Long media is processed in chunks and finished with one answer for the whole media.
 
 ## Examples
 

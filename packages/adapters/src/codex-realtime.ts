@@ -42,7 +42,11 @@ export class CodexTranscript {
     this.items.set(item.id, next);
     return !prior;
   }
-  result(): ChunkOutput {
+  /**
+   * Without any detected speech turn an empty transcript means the clip has no speech, such as
+   * room tone or music. After a turn, missing words remain an error.
+   */
+  result(speechDetected = true): ChunkOutput {
     const segments = [...this.items.values()].sort(
       (a, b) => a.startMs - b.startMs || a.endMs - b.endMs,
     );
@@ -50,6 +54,8 @@ export class CodexTranscript {
       .map((s) => s.text)
       .join('')
       .trim();
+    if (!text && !speechDetected)
+      return { text: '', segments: [], timeRanges: [], detectedLanguage: null };
     if (!text) throw new Error('Codex returned an empty audio transcript');
     return {
       text,
@@ -69,8 +75,11 @@ export async function streamAudio(
   workspace: string,
   env: NodeJS.ProcessEnv,
   durationMs: number,
+  hooks: { connected?: () => void } = {},
 ): Promise<ChunkOutput> {
   const peer = new RTCPeerConnection({ iceServers: [] });
+  // Bundling drops one gathered ICE transport from the peer; its sockets still need closing.
+  const iceConnections = new Set<{ close(): Promise<void> }>();
   const track = new MediaStreamTrack({ kind: 'audio' });
   peer.addTrack(track);
   const channel = peer.createDataChannel('oai-events');
@@ -80,6 +89,7 @@ export async function streamAudio(
   let encoder: ChildProcess | undefined;
   let settled = false;
   let lastTranscript = Date.now();
+  let speechTurns = 0;
   let outputBytes = 0;
   let completionTimer: ReturnType<typeof setInterval> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -134,6 +144,8 @@ export async function streamAudio(
         countOutput(Buffer.byteLength(text));
         const event = JSON.parse(text);
         if (event.type === 'error') throw new Error('Codex realtime transcription error');
+        // Codex opens a turn when its voice detection hears speech.
+        if (event.type === 'turn.created') speechTurns++;
         if (transcript.add(event)) lastTranscript = Date.now();
       } catch (error) {
         fail(error);
@@ -146,6 +158,7 @@ export async function streamAudio(
         return;
       }
       if (state !== 'connected' || encoder) return;
+      hooks.connected?.();
       const address = socket.address();
       if (typeof address === 'string') {
         fail(new Error('Invalid local audio socket'));
@@ -199,7 +212,7 @@ export async function streamAudio(
           // Trailing silence flushes VAD. Wait for a quiet transcript window after all audio is sent.
           if (Date.now() - finishedAt >= 5000 && Date.now() - lastTranscript >= 3000) {
             try {
-              const output = transcript.result();
+              const output = transcript.result(speechTurns > 0);
               settled = true;
               resolveResult(output);
             } catch (error) {
@@ -210,7 +223,10 @@ export async function streamAudio(
       });
     });
     await Promise.race([
-      (async () => peer.setLocalDescription(await peer.createOffer()))(),
+      (async () => {
+        await peer.setLocalDescription(await peer.createOffer());
+        for (const transport of peer.iceTransports) iceConnections.add(transport.connection);
+      })(),
       result,
     ]);
     if (settled) return await result;
@@ -237,11 +253,15 @@ export async function streamAudio(
     } catch {
       /* Socket may already be closed after setup failure. */
     }
-    await Promise.all([stopProcess(encoder), stopProcess(server), closePeer(peer)]);
+    await Promise.all([stopProcess(encoder), stopProcess(server), closePeer(peer, iceConnections)]);
   }
 }
 
-async function closePeer(peer: RTCPeerConnection): Promise<void> {
+async function closePeer(
+  peer: RTCPeerConnection,
+  iceConnections: Set<{ close(): Promise<void> }>,
+): Promise<void> {
+  for (const transport of peer.iceTransports) iceConnections.add(transport.connection);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
@@ -259,6 +279,8 @@ async function closePeer(peer: RTCPeerConnection): Promise<void> {
     ]);
   } finally {
     clearTimeout(timer);
+    // ICE connections own the gathered UDP sockets; closing an already closed one is harmless.
+    await Promise.all([...iceConnections].map((connection) => connection.close().catch(() => {})));
   }
 }
 

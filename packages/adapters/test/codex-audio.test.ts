@@ -7,10 +7,10 @@ const mocks = vi.hoisted(() => ({
   spawn: vi.fn(),
   peer: undefined as any,
   socket: undefined as any,
+  release: vi.fn(async () => {}),
 }));
 vi.mock('../src/subscription-runtime.js', () => ({
-  withCredentialLock: async (_home: string, _signal: AbortSignal, fn: () => Promise<unknown>) =>
-    fn(),
+  acquireCredentialLock: async () => mocks.release,
   subscriptionEnvironment: () => ({ PATH: '/bin' }),
   runSubscriptionProcess: mocks.run,
 }));
@@ -42,6 +42,12 @@ vi.mock('werift', () => ({
       },
     };
     addTrack() {}
+    // Two transports are gathered; bundling leaves the peer listing only one.
+    gathered = [
+      { connection: { close: vi.fn(async () => {}) } },
+      { connection: { close: vi.fn(async () => {}) } },
+    ];
+    iceTransports: any[] = [];
     constructor() {
       mocks.peer = this;
     }
@@ -57,8 +63,11 @@ vi.mock('werift', () => ({
     async createOffer() {
       return { type: 'offer', sdp: 'offer' };
     }
-    async setLocalDescription() {}
+    async setLocalDescription() {
+      this.iceTransports = [...this.gathered];
+    }
     async setRemoteDescription() {
+      this.iceTransports = [this.gathered[0]];
       this.connected?.('connected');
     }
     close = vi.fn(async () => {});
@@ -130,6 +139,14 @@ describe('Codex transcript normalization', () => {
   it('rejects empty, conflicting and malformed transcripts', () => {
     const result = new CodexTranscript(1000);
     expect(() => result.result()).toThrow('empty');
+    expect(() => result.result(true)).toThrow('empty');
+    // Without a detected speech turn, the clip simply has no speech.
+    expect(result.result(false)).toEqual({
+      text: '',
+      segments: [],
+      timeRanges: [],
+      detectedLanguage: null,
+    });
     result.add(event('a', 'Hi'));
     expect(() => result.add(event('a', 'Bye'))).toThrow('conflicting');
     expect(() => result.add(event('c', 'x', -1, 100))).toThrow('timestamps');
@@ -222,6 +239,39 @@ describe('Codex realtime lifecycle', () => {
       provenance: { transcription: { provider: 'codex', protocol: 'realtime-v3', model: null } },
     });
     expect(children.every((child) => child.kill.mock.calls.length === 1)).toBe(true);
+    for (const transport of mocks.peer.gathered)
+      expect(transport.connection.close).toHaveBeenCalled();
+  });
+  it('releases the credential lock once connected and returns no text for speechless audio', async () => {
+    const children = fixture();
+    const pending = transcribeCodexAudio(
+      artifact,
+      { signal: new AbortController().signal } as any,
+      options,
+    );
+    await started(children);
+    // The session is live and the encoder still streams; other chunks may start their sessions.
+    expect(mocks.release).toHaveBeenCalled();
+    vi.useFakeTimers();
+    children[1].emit('exit', 0);
+    await vi.advanceTimersByTimeAsync(5100);
+    vi.useRealTimers();
+    expect(await pending).toMatchObject({ text: '', segments: [] });
+
+    const heard = fixture();
+    const missing = transcribeCodexAudio(
+      artifact,
+      { signal: new AbortController().signal } as any,
+      options,
+    );
+    const rejected = expect(missing).rejects.toThrow('empty audio transcript');
+    await started(heard);
+    vi.useFakeTimers();
+    mocks.peer.receive(Buffer.from(JSON.stringify({ type: 'turn.created', turn: {} })));
+    heard[1].emit('exit', 0);
+    await vi.advanceTimersByTimeAsync(5100);
+    vi.useRealTimers();
+    await rejected;
   });
   it('rejects incompatible versions and oversized clips before network setup', async () => {
     fixture();

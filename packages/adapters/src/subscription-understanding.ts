@@ -8,7 +8,10 @@ import {
   type AdapterContext,
   type Artifact,
   type ChunkOutput,
+  type SynthesisInput,
+  type SynthesisOutput,
 } from '@media-ingest/sdk';
+import { parseSynthesis, synthesisPrompt, synthesisSchema } from './providers/shared.js';
 import { frameIntervalMs, prepareSubscriptionMedia } from './subscription-media.js';
 import { subscriptionEnvironment, withCredentialLock } from './subscription-runtime.js';
 import type {
@@ -123,6 +126,38 @@ export async function understandSubscription(
         ...(frames.length ? { frameIntervalMs } : {}),
       },
     };
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
+/** Combines span analyses with the selected subscription agent; no media is attached. */
+export async function synthesizeSubscription(
+  input: SynthesisInput,
+  request: MediaRequest,
+  context: AdapterContext,
+  options: SubscriptionUnderstandingOptions,
+  reasoner: SubscriptionReasoner,
+): Promise<SynthesisOutput> {
+  context = {
+    ...context,
+    signal: AbortSignal.any([context.signal, AbortSignal.timeout(options.timeoutMs ?? 180_000)]),
+  };
+  context.signal.throwIfAborted();
+  const workspace = await mkdtemp(join(tmpdir(), 'media-synthesis-'));
+  try {
+    return parseSynthesis(
+      await reason(
+        reasoner,
+        synthesisPrompt(input, request),
+        [],
+        synthesisSchema,
+        request,
+        context,
+        options,
+        workspace,
+      ),
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

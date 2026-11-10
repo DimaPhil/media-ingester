@@ -1,15 +1,27 @@
 import { readFile, stat } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { MediaRequest } from '@media-ingest/contracts';
+import type { MediaRequest, ResolvedSource } from '@media-ingest/contracts';
 import type {
   AdapterContext,
   Artifact,
+  Chunk,
   ChunkOutput,
   MediaInputFormat,
   MediaInspection,
+  RemoteMedia,
+  SynthesisInput,
+  SynthesisOutput,
 } from '@media-ingest/sdk';
 import { ApiProvider } from './api-provider.js';
-import { checked, key, parseChunk, parseModelJson, parseTranslation } from './shared.js';
+import {
+  checked,
+  key,
+  parseChunk,
+  parseModelJson,
+  parseSynthesis,
+  parseTranslation,
+  synthesisPrompt,
+} from './shared.js';
 
 interface GeminiFile {
   name: string;
@@ -24,8 +36,11 @@ interface GeminiOptions {
   transcriptionModel?: string;
   understandingModel?: string;
   translationModel?: string;
+  /** Read public YouTube videos by URL instead of uploading downloaded bytes. Default true. */
+  youtubeUrls?: boolean;
   timeoutMs?: number;
 }
+const youtubeId = /^[\w-]{11}$/;
 
 export class GeminiProvider extends ApiProvider {
   static readonly capabilities = {
@@ -68,6 +83,71 @@ export class GeminiProvider extends ApiProvider {
   /** Native video stays available for transcription as well. */
   override sourceMedia(): 'audio' | 'video' {
     return 'video';
+  }
+
+  /**
+   * Gemini fetches public YouTube videos itself, so no bytes are downloaded, re-encoded or
+   * uploaded. Private, unlisted, age-restricted and live videos keep the download path.
+   */
+  remoteMedia(_request: MediaRequest, source: ResolvedSource): RemoteMedia | null {
+    const { mediaId, durationMs, availability, ageLimit, live } = source.metadata;
+    if (
+      this.options.youtubeUrls === false ||
+      source.source.kind !== 'youtube' ||
+      typeof mediaId !== 'string' ||
+      !youtubeId.test(mediaId) ||
+      availability !== 'public' ||
+      (ageLimit !== undefined && ageLimit !== 0) ||
+      live !== false ||
+      typeof durationMs !== 'number' ||
+      !(durationMs > 0)
+    )
+      return null;
+    return { uri: `https://www.youtube.com/watch?v=${mediaId}`, durationMs };
+  }
+
+  /** Clips the remote video to the chunk with offsets; billing covers only the clip. */
+  async processRemote(
+    media: RemoteMedia,
+    chunk: Chunk,
+    request: MediaRequest,
+    context: AdapterContext,
+  ): Promise<ChunkOutput> {
+    const seconds = (ms: number) => `${ms / 1000}s`;
+    return parseChunk(
+      parseModelJson(
+        await generateGemini(
+          this.resolveModel(request),
+          key(this.options.apiKey, 'GEMINI_API_KEY'),
+          [
+            { text: instructions(request, chunk.endMs - chunk.startMs) },
+            {
+              file_data: { file_uri: media.uri },
+              video_metadata: {
+                start_offset: seconds(chunk.startMs),
+                end_offset: seconds(chunk.endMs),
+              },
+            },
+          ],
+          this.signal(context),
+        ),
+      ),
+    );
+  }
+
+  /** Text-only call with the understanding model over the span analyses. */
+  async synthesize(
+    input: SynthesisInput,
+    request: MediaRequest,
+    context: AdapterContext,
+  ): Promise<SynthesisOutput> {
+    const text = await generateGemini(
+      this.resolveModel(request),
+      key(this.options.apiKey, 'GEMINI_API_KEY'),
+      [{ text: synthesisPrompt(input, request) }],
+      this.signal(context),
+    );
+    return parseSynthesis(parseModelJson(text));
   }
 
   async process(
@@ -122,18 +202,13 @@ export class GeminiProvider extends ApiProvider {
         file = (await response.json()) as GeminiFile;
       }
       if (file.state !== 'ACTIVE' || !file.uri) throw new Error('Gemini media processing failed');
-      const prompt =
-        request.kind === 'transcription'
-          ? `Transcribe in the source language. ${request.inputLanguage ? `Expected language: ${request.inputLanguage}.` : ''} Return JSON {"text":string,"detectedLanguage":string|null,"segments":[{"startMs":number,"endMs":number,"text":string,"speaker"?:string}]}. If segment timing is uncertain, return the full transcript with empty segments.`
-          : `${request.prompt}\nReturn JSON {"text":string,"timeRanges":[{"startMs":number,"endMs":number,"label"?:string}]}. For a single still frame or uncertain timing, return the description with empty timeRanges.`;
-      const timing = `Use integer milliseconds relative to the start of this clip. Every interval must satisfy 0 <= startMs <= endMs${artifact.durationMs === undefined ? '' : ` <= ${artifact.durationMs}`}. Never guess timestamps.`;
       return parseChunk(
         parseModelJson(
           await generateGemini(
             model,
             apiKey,
             [
-              { text: `${prompt}\n${timing}` },
+              { text: instructions(request, artifact.durationMs) },
               { file_data: { mime_type: mimeType, file_uri: file.uri } },
             ],
             signal,
@@ -150,6 +225,16 @@ export class GeminiProvider extends ApiProvider {
       }).catch(() => undefined);
     }
   }
+}
+
+/** Task and timing instructions for one clip; explicit bounds keep Gemini's timestamps clip-relative. */
+function instructions(request: MediaRequest, durationMs: number | undefined): string {
+  const task =
+    request.kind === 'transcription'
+      ? `Transcribe in the source language. ${request.inputLanguage ? `Expected language: ${request.inputLanguage}.` : ''} Return JSON {"text":string,"detectedLanguage":string|null,"segments":[{"startMs":number,"endMs":number,"text":string,"speaker"?:string}]}. If segment timing is uncertain, return the full transcript with empty segments.`
+      : `${request.prompt}\nReturn JSON {"text":string,"timeRanges":[{"startMs":number,"endMs":number,"label"?:string}]}. For a single still frame or uncertain timing, return the description with empty timeRanges.`;
+  const timing = `Use integer milliseconds relative to the start of this clip. Every interval must satisfy 0 <= startMs <= endMs${durationMs === undefined ? '' : ` <= ${durationMs}`}. Never guess timestamps.`;
+  return `${task}\n${timing}`;
 }
 
 async function generateGemini(

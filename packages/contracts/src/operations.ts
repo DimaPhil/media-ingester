@@ -12,7 +12,7 @@ import {
   processedMediaSummarySchema,
 } from './media.js';
 
-export const RELEASE_VERSION = '1.3.0';
+export const RELEASE_VERSION = '1.4.0';
 export const API_VERSION = 'v1';
 export const MAX_INLINE_MEDIA_BYTES = 32 * 1024 * 1024;
 const idInput = z.object({ id: z.uuid() }).strict();

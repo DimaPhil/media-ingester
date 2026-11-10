@@ -18,6 +18,9 @@ const stitchWindowTokens = 24;
 /** Shortest common run trusted as the same speech in both chunks. */
 const stitchMinTokens = 3;
 
+/** A profile without measurable pauses: every boundary overlaps and is stitched. */
+export const NO_PAUSES: LoudnessProfile = { frameMs: 1000, levels: [] };
+
 /**
  * Splits media into chunks of at most `chunkDurationMs`. With a loudness profile, each boundary
  * is placed in the quietest pause near the chunk limit. Where no pause exists, neighboring

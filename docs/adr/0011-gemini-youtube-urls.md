@@ -1,0 +1,19 @@
+# ADR 0011 · Let Gemini read public YouTube videos by URL
+
+**Status** Accepted. Relaxes the content fingerprint of [ADR 0003](0003-worker-recovery.md) for remote media; builds on [ADR 0008](0008-result-reuse.md).
+
+## Context
+
+For Gemini, the worker downloaded the muxed source, re-encoded every 10-minute chunk with libx264, uploaded it to the Files API and deleted it again. Gemini can read a public YouTube video by URL, and `video_metadata` offsets clip the input. A live check on 2026-11-10 confirmed both: a 60-second clip billed 15,780 video and 1,920 audio tokens against 72,325 and 8,791 for the 275-second video, and with the production prompt the transcript covered only the clip with clip-relative timestamps. A loosely worded prompt made the model recite the whole well-known video from memory, so the bounded prompt matters.
+
+## Decision
+
+`ProviderAdapter.remoteMedia` lets a provider accept a resolved source without download. Gemini accepts YouTube sources whose yt-dlp metadata reports `availability: public`, age limit 0, not live or upcoming, a positive duration and an 11-character video ID. It reads `https://www.youtube.com/watch?v=<id>` and processes each chunk with `start_offset`/`end_offset`. Everything else keeps the download path. `MEDIA_GEMINI_YOUTUBE_URLS=false` disables remote reading.
+
+Remote media has no local bytes, so its source identity is `remote:<kind>:<site>:<mediaId>` instead of a SHA-256 of the content. Saved checkpoints resume only under the same identity; a job that saved byte checkpoints fails with `source_changed` rather than mixing identities. Duration comes from site metadata. Loudness cannot be measured, so every boundary overlaps and is stitched as in [ADR 0009](0009-pause-aligned-chunks.md).
+
+## Consequences
+
+Remote jobs download nothing and use no local CPU for media; Google fetches the video, at whatever quality it chooses, rather than the 360p muxed format yt-dlp selected. The site ID is trusted as content identity, as result reuse already does. A video replaced under the same ID is not detected. Transcription assumes the video has audio. Retained inspection reports the site duration and assumes audio and video streams, with no byte size. The free Gemini tier limits YouTube input to 8 hours per day. Changing YouTube availability during a job surfaces as a provider error.
+
+[Gemini provider](../../packages/adapters/src/providers/gemini.ts) · [yt-dlp metadata](../../packages/adapters/src/sources/yt-dlp-base.ts) · [Worker](../../packages/sdk/src/worker.ts) · [SDK tests](../../packages/sdk/test/synthesis.test.ts) · [Adapter tests](../../packages/adapters/test/providers.test.ts)

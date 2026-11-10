@@ -80,12 +80,42 @@ describe('source adapters', () => {
     await expect(
       sources.resolve({ kind: 'youtube', uri: 'https://youtube.com/watch?v=x&list=y' }, context),
     ).rejects.toThrow('playlist');
-    mocks.run.mockResolvedValueOnce(JSON.stringify({ title: 'Title', ext: 'mp4' }));
+    mocks.run.mockResolvedValueOnce(
+      JSON.stringify({
+        id: 'abcdefghijk',
+        title: 'Title',
+        ext: 'mp4',
+        duration: 275.4,
+        availability: 'public',
+        age_limit: 0,
+        live_status: 'not_live',
+      }),
+    );
     const resolved = await sources.resolve(
       { kind: 'youtube', uri: 'https://youtube.com/watch?v=x' },
       context,
     );
     expect(resolved.fileName).toBe('Title.mp4');
+    expect(resolved.metadata).toMatchObject({
+      mediaId: 'abcdefghijk',
+      durationMs: 275_400,
+      availability: 'public',
+      ageLimit: 0,
+      live: false,
+    });
+    for (const [data, live] of [
+      [{ is_live: true }, true],
+      [{ live_status: 'is_upcoming' }, true],
+      [{ live_status: 'was_live' }, false],
+      [{}, undefined],
+    ] as const) {
+      mocks.run.mockResolvedValueOnce(JSON.stringify({ title: 'T', ...data }));
+      const site = await sources.resolve(
+        { kind: 'youtube', uri: 'https://youtube.com/watch?v=x' },
+        context,
+      );
+      expect(site.metadata.live).toBe(live);
+    }
     expect(mocks.run.mock.calls[0]![1]).toEqual(
       expect.arrayContaining([
         '--cookies',
