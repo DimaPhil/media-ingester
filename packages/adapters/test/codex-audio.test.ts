@@ -31,6 +31,7 @@ vi.mock('node:dgram', () => ({
 vi.mock('werift', () => ({
   MediaStreamTrack: class {
     writeRtp = vi.fn();
+    stop = vi.fn();
   },
   RTCPeerConnection: class {
     localDescription = { sdp: 'offer' };
@@ -89,16 +90,26 @@ function fixture(account = 'chatgpt') {
     stderr: '',
   }));
   const children: any[] = [];
-  mocks.spawn.mockImplementation((_path: string, args: string[]) => {
+  // Children lead their own process group; group signals reach the fake child with that PID.
+  vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
+    const child = children.find((candidate) => candidate.pid === -pid);
+    if (!child) throw new Error('unexpected process signal');
+    child.kill(signal);
+    return true;
+  });
+  mocks.spawn.mockImplementation((_path: string, args: string[], spawnOptions: any) => {
     const child = new EventEmitter() as any;
+    child.spawnOptions = spawnOptions;
     child.stdin = new PassThrough();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
     child.exitCode = null;
-    child.pid = 123;
+    child.pid = 90_000 + children.length;
     child.signalCode = null;
-    child.kill = vi.fn(() => {
-      child.signalCode = 'SIGTERM';
+    child.kill = vi.fn((signal: string) => {
+      if (child.signalCode) return true;
+      child.signalCode = signal;
+      child.emit('exit', null, signal);
       child.emit('close');
       return true;
     });
@@ -119,11 +130,19 @@ function fixture(account = 'chatgpt') {
   });
   return children;
 }
+function expectGroupsStopped(children: any[]) {
+  for (const child of children) {
+    expect(child.spawnOptions.detached).toBe(true);
+    expect(process.kill).toHaveBeenCalledWith(-child.pid, 'SIGTERM');
+    expect(child.kill.mock.calls[0]).toEqual(['SIGTERM']);
+  }
+}
 async function started(children: any[], count = 2) {
   await vi.waitFor(() => expect(children).toHaveLength(count));
 }
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 describe('Codex transcript normalization', () => {
@@ -181,7 +200,7 @@ describe('Codex realtime lifecycle', () => {
     await started(children);
     controller.abort();
     await assertion;
-    expect(children.every((child) => child.kill.mock.calls.length === 1)).toBe(true);
+    expectGroupsStopped(children);
     expect(mocks.peer.close).toHaveBeenCalled();
     expect(mocks.socket.close).toHaveBeenCalled();
   });
@@ -238,7 +257,41 @@ describe('Codex realtime lifecycle', () => {
       text: 'Hello',
       provenance: { transcription: { provider: 'codex', protocol: 'realtime-v3', model: null } },
     });
-    expect(children.every((child) => child.kill.mock.calls.length === 1)).toBe(true);
+    expectGroupsStopped(children);
+    for (const transport of mocks.peer.gathered)
+      expect(transport.connection.close).toHaveBeenCalled();
+  });
+  it('keeps a finished transcript when shutdown stalls and kills groups ignoring SIGTERM', async () => {
+    const children = fixture();
+    const pending = transcribeCodexAudio(
+      artifact,
+      { signal: new AbortController().signal } as any,
+      options,
+    );
+    await started(children);
+    const server = children[0];
+    server.kill.mockImplementation((signal: string) => {
+      if (signal !== 'SIGKILL' || server.signalCode) return true;
+      server.signalCode = signal;
+      server.emit('exit', null, signal);
+      return true;
+    });
+    mocks.peer.close.mockImplementation(() => new Promise(() => {}));
+    const dtls = { stop: vi.fn(async () => {}) };
+    mocks.peer.dtlsTransports = [dtls];
+    mocks.peer.iceTransports[0].stop = vi.fn(async () => {});
+    vi.useFakeTimers();
+    mocks.peer.receive(Buffer.from(JSON.stringify(event('a', 'Hello'))));
+    children[1].emit('exit', 0);
+    await vi.advanceTimersByTimeAsync(5100 + 5000);
+    expect(await pending).toMatchObject({ text: 'Hello' });
+    expect(server.kill.mock.calls.map((call: string[]) => call[0])).toEqual([
+      'SIGTERM',
+      'SIGKILL',
+      'SIGKILL',
+    ]);
+    expect(dtls.stop).toHaveBeenCalled();
+    expect(mocks.peer.iceTransports[0].stop).toHaveBeenCalled();
     for (const transport of mocks.peer.gathered)
       expect(transport.connection.close).toHaveBeenCalled();
   });

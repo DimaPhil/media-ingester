@@ -190,7 +190,7 @@ export async function streamAudio(
           'rtp',
           `rtp://127.0.0.1:${address.port}`,
         ],
-        { cwd: workspace, env, stdio: ['ignore', 'ignore', 'pipe'] },
+        { cwd: workspace, env, detached: ownGroup, stdio: ['ignore', 'ignore', 'pipe'] },
       );
       encoder.on('error', () => fail(new Error('Audio encoder could not start')));
       encoder.stderr?.on('data', (data: Buffer) => {
@@ -253,46 +253,84 @@ export async function streamAudio(
     } catch {
       /* Socket may already be closed after setup failure. */
     }
+    track.stop();
     await Promise.all([stopProcess(encoder), stopProcess(server), closePeer(peer, iceConnections)]);
   }
 }
 
+/** Cleanup never throws: a stalled shutdown must not discard a finished transcript. */
 async function closePeer(
   peer: RTCPeerConnection,
   iceConnections: Set<{ close(): Promise<void> }>,
 ): Promise<void> {
   for (const transport of peer.iceTransports) iceConnections.add(transport.connection);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      peer.close(),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          // If graceful SCTP shutdown stalls, stop its underlying socket transports too.
-          for (const transport of [...peer.dtlsTransports, ...peer.iceTransports]) {
-            void transport.stop().catch(() => {});
-          }
-          reject(new Error('Codex audio peer cleanup timed out'));
-        }, 2000);
-        timer.unref();
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-    // ICE connections own the gathered UDP sockets; closing an already closed one is harmless.
-    await Promise.all([...iceConnections].map((connection) => connection.close().catch(() => {})));
-  }
+  const closed = await Promise.race([
+    peer.close().then(
+      () => true,
+      () => false,
+    ),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), 2000);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (!closed)
+    // Graceful SCTP shutdown stalled or failed; stop the underlying socket transports directly.
+    await bounded(
+      Promise.allSettled(
+        [...peer.dtlsTransports, ...peer.iceTransports].map((transport) => transport.stop()),
+      ),
+    );
+  // ICE connections own the gathered UDP sockets; closing an already closed one is harmless.
+  await bounded(Promise.allSettled([...iceConnections].map((connection) => connection.close())));
 }
 
+async function bounded(work: Promise<unknown>, ms = 2000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([work, new Promise((resolve) => (timer = setTimeout(resolve, ms)))]);
+  clearTimeout(timer);
+}
+
+/** Children lead their own process group, so stopping them also stops what they spawned. */
+const ownGroup = process.platform !== 'win32';
+
+/**
+ * Stops a child and its process group: SIGTERM, then SIGKILL after one second. `codex` is a Node
+ * launcher for a native binary, so signalling only the leader could orphan the binary. Waiting is
+ * bounded because a descendant holding the leader's pipes would otherwise delay cleanup forever.
+ */
 async function stopProcess(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode !== null)
+  const pid = child?.pid;
+  if (!child || pid === undefined) return;
+  const signal = (name: NodeJS.Signals) => {
+    try {
+      if (ownGroup) process.kill(-pid, name);
+      else child.kill(name);
+    } catch {
+      /* The group has already exited. */
+    }
+  };
+  if (child.exitCode !== null || child.signalCode !== null) {
+    // The leader exited by itself; descendants may still hold its group.
+    signal('SIGKILL');
     return;
+  }
   await new Promise<void>((resolve) => {
-    const killTimer = setTimeout(() => child.kill('SIGKILL'), 1000);
-    child.once('close', () => {
+    const done = () => {
       clearTimeout(killTimer);
+      clearTimeout(deadline);
+      child.stdin?.destroy();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       resolve();
+    };
+    const killTimer = setTimeout(() => signal('SIGKILL'), 1000);
+    const deadline = setTimeout(done, 3000);
+    child.once('exit', () => {
+      signal('SIGKILL');
+      done();
     });
-    child.kill('SIGTERM');
+    signal('SIGTERM');
   });
 }

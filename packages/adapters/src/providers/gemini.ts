@@ -114,23 +114,25 @@ export class GeminiProvider extends ApiProvider {
     context: AdapterContext,
   ): Promise<ChunkOutput> {
     const seconds = (ms: number) => `${ms / 1000}s`;
-    return parseChunk(
-      parseModelJson(
-        await generateGemini(
-          this.resolveModel(request),
-          key(this.options.apiKey, 'GEMINI_API_KEY'),
-          [
-            { text: instructions(request, chunk.endMs - chunk.startMs) },
-            {
-              file_data: { file_uri: media.uri },
-              video_metadata: {
-                start_offset: seconds(chunk.startMs),
-                end_offset: seconds(chunk.endMs),
-              },
+    const clipMs = chunk.endMs - chunk.startMs;
+    const model = this.resolveModel(request);
+    const apiKey = key(this.options.apiKey, 'GEMINI_API_KEY');
+    const signal = this.signal(context);
+    return withinClip(clipMs, () =>
+      generateGemini(
+        model,
+        apiKey,
+        [
+          { text: instructions(request, clipMs) },
+          {
+            file_data: { file_uri: media.uri },
+            video_metadata: {
+              start_offset: seconds(chunk.startMs),
+              end_offset: seconds(chunk.endMs),
             },
-          ],
-          this.signal(context),
-        ),
+          },
+        ],
+        signal,
       ),
     );
   }
@@ -202,17 +204,16 @@ export class GeminiProvider extends ApiProvider {
         file = (await response.json()) as GeminiFile;
       }
       if (file.state !== 'ACTIVE' || !file.uri) throw new Error('Gemini media processing failed');
-      return parseChunk(
-        parseModelJson(
-          await generateGemini(
-            model,
-            apiKey,
-            [
-              { text: instructions(request, artifact.durationMs) },
-              { file_data: { mime_type: mimeType, file_uri: file.uri } },
-            ],
-            signal,
-          ),
+      const fileUri = file.uri;
+      return await withinClip(artifact.durationMs, () =>
+        generateGemini(
+          model,
+          apiKey,
+          [
+            { text: instructions(request, artifact.durationMs) },
+            { file_data: { mime_type: mimeType, file_uri: fileUri } },
+          ],
+          signal,
         ),
       );
     } finally {
@@ -225,6 +226,30 @@ export class GeminiProvider extends ApiProvider {
       }).catch(() => undefined);
     }
   }
+}
+
+const clipAttempts = 3;
+
+/**
+ * Gemini's video timestamps are approximate, and some runs drift past the end of the clip. Such
+ * output is requested again, up to three calls in total; the worker rejects whatever remains.
+ */
+async function withinClip(
+  clipMs: number | undefined,
+  generate: () => Promise<string>,
+): Promise<ChunkOutput> {
+  let output!: ChunkOutput;
+  for (let attempt = 0; attempt < clipAttempts; attempt += 1) {
+    output = parseChunk(parseModelJson(await generate()));
+    if (
+      clipMs === undefined ||
+      [...output.segments, ...output.timeRanges].every(
+        (range) => range.startMs >= 0 && range.startMs <= range.endMs && range.endMs <= clipMs,
+      )
+    )
+      return output;
+  }
+  return output;
 }
 
 /** Task and timing instructions for one clip; explicit bounds keep Gemini's timestamps clip-relative. */

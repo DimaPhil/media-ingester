@@ -305,6 +305,38 @@ describe('provider normalization', () => {
     expect(fetcher.mock.calls[0]![0]).toContain('gemini-2.5-flash:generateContent');
   });
 
+  it('asks Gemini again when timestamps drift past the clip, at most three calls', async () => {
+    const providers = new NodeProviders({ geminiApiKey: 'key' });
+    const gemini = { ...request, provider: 'google-gemini' as const };
+    const reply = (endMs: number) =>
+      Response.json({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({ text: 'w', segments: [{ startMs: 0, endMs, text: 'w' }] }),
+                },
+              ],
+            },
+          },
+        ],
+      });
+    const media = { uri: 'https://www.youtube.com/watch?v=abcdefghijk', durationMs: 5_000 };
+    const chunk = { index: 0, startMs: 0, endMs: 5_000 };
+    const fetcher = vi.fn().mockResolvedValueOnce(reply(9_000)).mockResolvedValueOnce(reply(4_000));
+    vi.stubGlobal('fetch', fetcher);
+    const output = await providers.processRemote(media, chunk, gemini, context);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(output.segments[0]!.endMs).toBe(4_000);
+
+    const drifting = vi.fn().mockImplementation(async () => reply(9_000));
+    vi.stubGlobal('fetch', drifting);
+    const last = await providers.processRemote(media, chunk, gemini, context);
+    expect(drifting).toHaveBeenCalledTimes(3);
+    expect(last.segments[0]!.endMs).toBe(9_000);
+  });
+
   it('uses Google Speech v2 regional endpoint and normalizes fractional timestamps', async () => {
     const file = { ...(await artifact()), durationMs: 1241 };
     const fetcher = vi.fn().mockResolvedValue(
