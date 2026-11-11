@@ -10,6 +10,7 @@ import {
   parseModelJson,
   parseOpenAi,
 } from '../src/providers.js';
+import { toClipTime } from '../src/providers/gemini.js';
 import type { MediaRequest } from '@media-ingest/contracts';
 
 vi.mock('google-auth-library', () => ({
@@ -162,7 +163,7 @@ describe('provider normalization', () => {
     expect(fetcher.mock.calls[1]![1].headers['content-type']).toBe('video/mp4');
     const generated = JSON.parse(fetcher.mock.calls[2]![1].body);
     expect(generated.contents[0].parts[0].text).toContain('Transcribe in the source language');
-    expect(generated.contents[0].parts[0].text).toContain('0 <= startMs <= endMs <= 2750');
+    expect(generated.contents[0].parts[0].text).toContain('00:00 <= start <= end <= 00:02.750');
     expect(generated.contents[0].parts[0].text).toContain('full transcript with empty segments');
     expect(generated.contents[0].parts[1].file_data).toEqual({
       mime_type: 'video/mp4',
@@ -301,21 +302,25 @@ describe('provider normalization', () => {
       file_data: { file_uri: 'https://www.youtube.com/watch?v=abcdefghijk' },
       video_metadata: { start_offset: '596s', end_offset: '1196.5s' },
     });
-    expect(body.contents[0].parts[0].text).toContain('<= 600500');
+    expect(body.contents[0].parts[0].text).toContain('from 09:56 to 19:56.500');
+    expect(body.contents[0].parts[0].text).toContain('09:56 <= start <= end <= 19:56.500');
     expect(fetcher.mock.calls[0]![0]).toContain('gemini-2.5-flash:generateContent');
   });
 
   it('asks Gemini again when timestamps drift past the clip, at most three calls', async () => {
     const providers = new NodeProviders({ geminiApiKey: 'key' });
     const gemini = { ...request, provider: 'google-gemini' as const };
-    const reply = (endMs: number) =>
+    const reply = (end: string) =>
       Response.json({
         candidates: [
           {
             content: {
               parts: [
                 {
-                  text: JSON.stringify({ text: 'w', segments: [{ startMs: 0, endMs, text: 'w' }] }),
+                  text: JSON.stringify({
+                    text: 'w',
+                    segments: [{ start: '00:00', end, text: 'w' }],
+                  }),
                 },
               ],
             },
@@ -324,17 +329,52 @@ describe('provider normalization', () => {
       });
     const media = { uri: 'https://www.youtube.com/watch?v=abcdefghijk', durationMs: 5_000 };
     const chunk = { index: 0, startMs: 0, endMs: 5_000 };
-    const fetcher = vi.fn().mockResolvedValueOnce(reply(9_000)).mockResolvedValueOnce(reply(4_000));
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(reply('00:09'))
+      .mockResolvedValueOnce(reply('00:04'));
     vi.stubGlobal('fetch', fetcher);
     const output = await providers.processRemote(media, chunk, gemini, context);
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(output.segments[0]!.endMs).toBe(4_000);
 
-    const drifting = vi.fn().mockImplementation(async () => reply(9_000));
+    const drifting = vi.fn().mockImplementation(async () => reply('00:09'));
     vi.stubGlobal('fetch', drifting);
     const last = await providers.processRemote(media, chunk, gemini, context);
     expect(drifting).toHaveBeenCalledTimes(3);
     expect(last.segments[0]!.endMs).toBe(9_000);
+  });
+
+  it('converts Gemini video-timeline timestamps to clip time, absorbing one-second edges', () => {
+    const clip = { startMs: 596_000, endMs: 1_196_500 };
+    const converted = toClipTime(
+      {
+        text: 't',
+        segments: [
+          { start: '09:55.5', end: '10:00.25', text: 'a' },
+          { start: '19:50', end: '19:57', text: 'b' },
+          { start: 660, end: '0:11:00', text: 'c' },
+        ],
+      },
+      clip,
+    );
+    expect(converted.inside).toBe(true);
+    expect((converted.value as any).segments).toEqual([
+      { startMs: 0, endMs: 4_250, text: 'a' },
+      { startMs: 594_000, endMs: 600_500, text: 'b' },
+      { startMs: 64_000, endMs: 64_000, text: 'c' },
+    ]);
+    for (const segment of [
+      { start: '09:54', end: '10:00' },
+      { start: '10:00', end: '19:58' },
+      { start: '10:05', end: '10:01' },
+      { start: 'soon', end: '10:01' },
+    ])
+      expect(toClipTime({ text: 't', timeRanges: [segment] }, clip).inside).toBe(false);
+    expect(toClipTime({ text: 't' }, { startMs: 0, endMs: undefined })).toEqual({
+      value: { text: 't', segments: undefined, timeRanges: undefined },
+      inside: true,
+    });
   });
 
   it('uses Google Speech v2 regional endpoint and normalizes fractional timestamps', async () => {
@@ -413,7 +453,7 @@ describe('provider normalization', () => {
     ).toBe('scene');
     expect(fetcher.mock.calls[2]![0]).toContain('/v1beta/files/abc');
     const prompt = JSON.parse(fetcher.mock.calls[3]![1].body).contents[0].parts[0].text;
-    expect(prompt).toContain('0 <= startMs <= endMs <= 40');
+    expect(prompt).toContain('00:00 <= start <= end <= 00:00.040');
     expect(prompt).toContain('single still frame or uncertain timing');
   });
   it('validates output and preserves millisecond offsets', () => {

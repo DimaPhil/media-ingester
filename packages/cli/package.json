@@ -1,6 +1,6 @@
 {
   "name": "@media-ingest/cli",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "HTTP-only Media Ingest CLI with bundled agent skill",
   "bin": {
     "media": "dist/index.js"
