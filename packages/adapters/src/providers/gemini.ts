@@ -114,16 +114,16 @@ export class GeminiProvider extends ApiProvider {
     context: AdapterContext,
   ): Promise<ChunkOutput> {
     const seconds = (ms: number) => `${ms / 1000}s`;
-    const clipMs = chunk.endMs - chunk.startMs;
     const model = this.resolveModel(request);
     const apiKey = key(this.options.apiKey, 'GEMINI_API_KEY');
     const signal = this.signal(context);
-    return withinClip(clipMs, () =>
+    const clip = { startMs: chunk.startMs, endMs: chunk.endMs };
+    return withinClip(clip, () =>
       generateGemini(
         model,
         apiKey,
         [
-          { text: instructions(request, clipMs) },
+          { text: instructions(request, clip) },
           {
             file_data: { file_uri: media.uri },
             video_metadata: {
@@ -205,12 +205,13 @@ export class GeminiProvider extends ApiProvider {
       }
       if (file.state !== 'ACTIVE' || !file.uri) throw new Error('Gemini media processing failed');
       const fileUri = file.uri;
-      return await withinClip(artifact.durationMs, () =>
+      const clip = { startMs: 0, endMs: artifact.durationMs };
+      return await withinClip(clip, () =>
         generateGemini(
           model,
           apiKey,
           [
-            { text: instructions(request, artifact.durationMs) },
+            { text: instructions(request, clip) },
             { file_data: { mime_type: mimeType, file_uri: fileUri } },
           ],
           signal,
@@ -230,36 +231,91 @@ export class GeminiProvider extends ApiProvider {
 
 const clipAttempts = 3;
 
-/**
- * Gemini's video timestamps are approximate, and some runs drift past the end of the clip. Such
- * output is requested again, up to three calls in total; the worker rejects whatever remains.
- */
-async function withinClip(
-  clipMs: number | undefined,
-  generate: () => Promise<string>,
-): Promise<ChunkOutput> {
-  let output!: ChunkOutput;
-  for (let attempt = 0; attempt < clipAttempts; attempt += 1) {
-    output = parseChunk(parseModelJson(await generate()));
-    if (
-      clipMs === undefined ||
-      [...output.segments, ...output.timeRanges].every(
-        (range) => range.startMs >= 0 && range.startMs <= range.endMs && range.endMs <= clipMs,
-      )
-    )
-      return output;
-  }
-  return output;
+/** The span of the source video a call sees. Gemini labels frames on the source video's timeline. */
+interface Clip {
+  startMs: number;
+  endMs: number | undefined;
 }
 
-/** Task and timing instructions for one clip; explicit bounds keep Gemini's timestamps clip-relative. */
-function instructions(request: MediaRequest, durationMs: number | undefined): string {
+/**
+ * Gemini's timestamps are approximate, and some calls still drift outside the clip. Such output is
+ * requested again, up to three calls in total; the worker rejects whatever remains.
+ */
+async function withinClip(clip: Clip, generate: () => Promise<string>): Promise<ChunkOutput> {
+  for (let attempt = 1; ; attempt += 1) {
+    const output = toClipTime(parseModelJson(await generate()), clip);
+    if (output.inside || attempt >= clipAttempts) return parseChunk(output.value);
+  }
+}
+
+/**
+ * Converts video-timeline timestamps to milliseconds from the clip start. MM:SS has one-second
+ * resolution, so a timestamp within one second outside an edge counts as that edge.
+ */
+export function toClipTime(value: unknown, clip: Clip): { value: unknown; inside: boolean } {
+  if (!value || typeof value !== 'object') return { value, inside: true };
+  const lengthMs = clip.endMs === undefined ? Infinity : clip.endMs - clip.startMs;
+  let inside = true;
+  const at = (raw: unknown) => {
+    const ms = Math.round(seconds(raw) * 1000) - clip.startMs;
+    if (ms < 0 && ms >= -1000) return 0;
+    if (ms > lengthMs && ms <= lengthMs + 1000) return lengthMs;
+    return ms;
+  };
+  const convert = (list: unknown) =>
+    Array.isArray(list)
+      ? list.map((item: unknown) => {
+          if (!item || typeof item !== 'object') return item;
+          const { start, end, ...rest } = item as Record<string, unknown>;
+          const startMs = at(start);
+          const endMs = at(end);
+          if (!(startMs >= 0 && startMs <= endMs && endMs <= lengthMs)) inside = false;
+          return { ...rest, startMs, endMs };
+        })
+      : list;
+  const record = value as Record<string, unknown>;
+  const converted = {
+    ...record,
+    segments: convert(record.segments),
+    timeRanges: convert(record.timeRanges),
+  };
+  return { value: converted, inside };
+}
+
+/** Seconds from `H:MM:SS`, `MM:SS` or a plain number, each with optional fractions; NaN otherwise. */
+function seconds(value: unknown): number {
+  if (typeof value === 'number') return value;
+  if (typeof value !== 'string' || !/^\d+(?::\d{1,2}){0,2}(?:\.\d+)?$/.test(value.trim()))
+    return Number.NaN;
+  return value
+    .trim()
+    .split(':')
+    .reduce((total, part) => total * 60 + Number(part), 0);
+}
+
+function clock(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const fraction = ms % 1000 ? `.${String(ms % 1000).padStart(3, '0')}` : '';
+  const pad = (part: number) => String(part).padStart(2, '0');
+  const hours = Math.floor(total / 3600);
+  const rest = `${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}${fraction}`;
+  return hours ? `${hours}:${rest}` : rest;
+}
+
+/**
+ * Task and timing instructions for one clip. Gemini sees frames labelled on the source video's
+ * timeline even when offsets clip it, so timestamps use that timeline and the code converts them.
+ * Clip-relative milliseconds drifted past the clip in live runs; this format stayed within it.
+ */
+function instructions(request: MediaRequest, clip: Clip): string {
   const task =
     request.kind === 'transcription'
-      ? `Transcribe in the source language. ${request.inputLanguage ? `Expected language: ${request.inputLanguage}.` : ''} Return JSON {"text":string,"detectedLanguage":string|null,"segments":[{"startMs":number,"endMs":number,"text":string,"speaker"?:string}]}. If segment timing is uncertain, return the full transcript with empty segments.`
-      : `${request.prompt}\nReturn JSON {"text":string,"timeRanges":[{"startMs":number,"endMs":number,"label"?:string}]}. For a single still frame or uncertain timing, return the description with empty timeRanges.`;
-  const timing = `Use integer milliseconds relative to the start of this clip. Every interval must satisfy 0 <= startMs <= endMs${durationMs === undefined ? '' : ` <= ${durationMs}`}. Never guess timestamps.`;
-  return `${task}\n${timing}`;
+      ? `Transcribe in the source language. ${request.inputLanguage ? `Expected language: ${request.inputLanguage}.` : ''} Return JSON {"text":string,"detectedLanguage":string|null,"segments":[{"start":string,"end":string,"text":string,"speaker"?:string}]}. If segment timing is uncertain, return the full transcript with empty segments.`
+      : `${request.prompt}\nReturn JSON {"text":string,"timeRanges":[{"start":string,"end":string,"label"?:string}]}. For a single still frame or uncertain timing, return the description with empty timeRanges.`;
+  if (clip.endMs === undefined)
+    return `${task}\nWrite timestamps as MM:SS (or MM:SS.mmm) on the video's own timeline. Never guess timestamps.`;
+  const [from, to] = [clock(clip.startMs), clock(clip.endMs)];
+  return `${task}\nYou are given only the part of the video from ${from} to ${to}. Describe only what is in this part. Write timestamps as MM:SS (or MM:SS.mmm) on the video's own timeline, as shown with the frames, so every interval satisfies ${from} <= start <= end <= ${to}. Never guess timestamps.`;
 }
 
 async function generateGemini(
