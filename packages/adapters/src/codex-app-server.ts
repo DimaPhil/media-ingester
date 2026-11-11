@@ -43,7 +43,13 @@ export function startCodexAppServer(
       '-c',
       'project_doc_max_bytes=0',
     ],
-    { cwd: workspace, env, stdio: ['pipe', 'pipe', 'pipe'] },
+    // Own process group: cleanup stops the launcher and the native binary it starts.
+    {
+      cwd: workspace,
+      env,
+      detached: process.platform !== 'win32',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
   );
   server.on('error', () => fail(new Error('Codex app-server could not start')));
   server.on('exit', () =>
