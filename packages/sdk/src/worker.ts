@@ -32,6 +32,8 @@ export class JobWorker {
     private readonly options: SdkOptions,
     private readonly repository: JobRepository,
     private readonly now: () => number,
+    /** Runs when an attempt loses its lease, so the host can reclaim the job once it expires. */
+    private readonly onLeaseLost?: (leaseMs: number) => void,
   ) {
     this.concurrency = options.chunkConcurrency ?? 2;
     this.leaseMs = options.leaseMs ?? 60000;
@@ -87,7 +89,8 @@ export class JobWorker {
     try {
       await this.process(lease, context, abort);
     } catch (error) {
-      if (!(error instanceof LeaseLostError) && !leaseLost && !signal?.aborted) {
+      if (error instanceof LeaseLostError) leaseLost = true;
+      if (!leaseLost && !signal?.aborted) {
         try {
           this.options.onProcessingError?.(job.id, error);
         } catch {
@@ -105,9 +108,11 @@ export class JobWorker {
           await this.repository.fail(job.id, token, failure, this.now());
         } catch (writeError) {
           if (!(writeError instanceof LeaseLostError)) throw writeError;
+          leaseLost = true;
         }
       }
     } finally {
+      if (leaseLost && !signal?.aborted) this.onLeaseLost?.(this.leaseMs);
       clearInterval(timer);
       await heartbeat;
       signal?.removeEventListener('abort', externalAbort);

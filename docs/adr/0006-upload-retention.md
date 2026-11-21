@@ -1,6 +1,6 @@
 # ADR 0006 · Release uploaded inputs after successful processing
 
-**Status** Accepted
+**Status** Accepted. Cleanup scheduling is amended by [ADR 0013](0013-idle-database-quiet.md).
 
 ## Context
 

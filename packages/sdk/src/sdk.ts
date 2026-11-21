@@ -10,6 +10,7 @@ import {
 import { MediaError } from './errors.js';
 import { MemoryJobRepository } from './memory-repository.js';
 import { JobWorker } from './worker.js';
+import { runWorkerLoops, WorkSignal, type WorkerLoopOptions } from './workers.js';
 import type { JobRecord, JobRepository, ListJobs, SdkOptions } from './ports.js';
 
 export { planChunks, aggregate, stitchOverlap, NO_PAUSES } from './chunks.js';
@@ -18,10 +19,14 @@ export class MediaSdk {
   readonly repository: JobRepository;
   private readonly now: () => number;
   private readonly worker: JobWorker;
+  private readonly work = new WorkSignal();
   constructor(private readonly options: SdkOptions) {
     this.repository = options.repository ?? new MemoryJobRepository();
     this.now = options.clock ?? Date.now;
-    this.worker = new JobWorker(options, this.repository, this.now);
+    this.worker = new JobWorker(options, this.repository, this.now, (leaseMs) => {
+      // The abandoned job becomes claimable once its lease expires; look again then.
+      setTimeout(() => this.wake(), leaseMs + 1000).unref?.();
+    });
   }
 
   async submit(ownerId: string, input: MediaRequest, idempotencyKey?: string): Promise<JobView> {
@@ -57,7 +62,10 @@ export class MediaSdk {
       leaseToken: null,
       leaseExpiresAt: null,
     };
-    return jobSchema.parse(await this.repository.enqueue(job));
+    const stored = jobSchema.parse(await this.repository.enqueue(job));
+    // Also wakes idle hosts for replays: their idle hook can release a republished upload.
+    this.wake();
+    return stored;
   }
 
   async get(ownerId: string, id: string): Promise<JobView> {
@@ -73,7 +81,9 @@ export class MediaSdk {
   }
 
   async retry(ownerId: string, id: string): Promise<JobView> {
-    return jobSchema.parse(await this.repository.retry(ownerId, id, this.now()));
+    const job = jobSchema.parse(await this.repository.retry(ownerId, id, this.now()));
+    this.wake();
+    return job;
   }
 
   history(ownerId: string, input: ListHistory = { limit: 20 }) {
@@ -93,5 +103,19 @@ export class MediaSdk {
   /** Processes one durable job. Returns false when no job is claimable. */
   runNext(signal?: AbortSignal): Promise<boolean> {
     return this.worker.runNext(signal);
+  }
+
+  /** Wakes idle `runWorkers` loops in this process to look for claimable jobs. */
+  wake(): void {
+    this.work.notify();
+  }
+
+  /**
+   * Runs worker loops until `options.signal` aborts. Each loop drains claimable jobs, then sleeps
+   * without touching the repository until `submit`, `retry` or `wake` is called, or until the
+   * shared `idlePollMs` fallback fires. Every loop looks for work once at startup.
+   */
+  runWorkers(options: WorkerLoopOptions): Promise<void> {
+    return runWorkerLoops((signal) => this.runNext(signal), this.work, options);
   }
 }

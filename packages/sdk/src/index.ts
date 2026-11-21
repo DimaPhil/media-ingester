@@ -5,3 +5,4 @@ export * from './sdk.js';
 export * from './history.js';
 export * from './cache.js';
 export * from './synthesis.js';
+export * from './workers.js';

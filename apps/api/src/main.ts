@@ -1,4 +1,3 @@
-import { setTimeout as delay } from 'node:timers/promises';
 import { serve } from '@hono/node-server';
 import postgres from 'postgres';
 import { MediaSdk } from '@media-ingest/sdk';
@@ -11,6 +10,7 @@ import {
   NodeProviders,
 } from '@media-ingest/adapters';
 import { createApplication } from './application.js';
+import { drainAll, startMaintenance } from './background.js';
 import { loadConfig } from './config.js';
 import { createUploadStorage } from './upload-storage.js';
 
@@ -85,6 +85,8 @@ const sdk = new MediaSdk({
     ),
 });
 const authStore = new PostgresAuthStore(sql);
+const UPLOAD_BATCH = 32;
+const JOB_EXPIRY_BATCH = 100;
 const application = createApplication({
   sdk,
   sources,
@@ -96,54 +98,30 @@ const application = createApplication({
   logger: (error) =>
     console.error('Request failed', error instanceof Error ? error.name : 'UnknownError'),
 });
-const pruneTimer = setInterval(
-  () => {
-    void authStore.prune().catch(() => console.error('Auth expiry cleanup failed'));
-  },
-  60 * 60 * 1000,
-);
-pruneTimer.unref();
-let cleanup: Promise<void> | undefined;
-function cleanCompletedUploads() {
-  if (cleanup) return;
-  cleanup = retention
-    .drain()
-    .then(() => {})
-    .catch(() => console.error('Completed upload cleanup failed; will retry'))
-    .finally(() => {
-      cleanup = undefined;
-    });
-}
-cleanCompletedUploads();
-const cleanupTimer = setInterval(cleanCompletedUploads, 5000);
-cleanupTimer.unref();
 const jobRetention = new PostgresJobRetention(sql, retention);
-let jobCleanup: Promise<unknown> | undefined;
-function expireJobs() {
-  if (jobCleanup) return;
-  jobCleanup = jobRetention
-    .drain()
-    .catch(() => console.error('Expired job cleanup failed; will retry'))
-    .finally(() => {
-      jobCleanup = undefined;
-    });
-}
-expireJobs();
-const jobCleanupTimer = setInterval(expireJobs, 60_000);
-jobCleanupTimer.unref();
+const maintenance = startMaintenance({
+  cleanUploads: drainAll(() => retention.drain(UPLOAD_BATCH), UPLOAD_BATCH),
+  expireJobs: drainAll(() => jobRetention.drain(), JOB_EXPIRY_BATCH),
+  pruneAuth: () => authStore.prune(),
+  intervalMs: config.MEDIA_MAINTENANCE_INTERVAL_MS,
+  onError: (task) =>
+    console.error(
+      {
+        uploads: 'Completed upload cleanup failed; will retry',
+        jobs: 'Expired job cleanup failed; will retry',
+        auth: 'Auth expiry cleanup failed',
+      }[task],
+    ),
+});
 const abort = new AbortController();
-const workers = Array.from({ length: config.MEDIA_WORKERS }, async () => {
-  while (!abort.signal.aborted) {
-    try {
-      if (!(await sdk.runNext(abort.signal)))
-        await delay(1000, undefined, { signal: abort.signal });
-    } catch {
-      if (!abort.signal.aborted) {
-        console.error('Worker failed; durable job remains recoverable');
-        await delay(1000, undefined, { signal: abort.signal }).catch(() => {});
-      }
-    }
-  }
+// Idle workers issue no queries until a submission/retry wakes them or the fallback poll fires,
+// so a scale-to-zero database (Neon suspends after 5 idle minutes) can suspend.
+const workers = sdk.runWorkers({
+  workers: config.MEDIA_WORKERS,
+  idlePollMs: config.MEDIA_WORKER_IDLE_POLL_MS,
+  signal: abort.signal,
+  onIdle: () => maintenance.workersIdle(),
+  onError: () => console.error('Worker failed; durable job remains recoverable'),
 });
 const server = serve(
   { fetch: application.app.fetch, hostname: config.MEDIA_HOST, port: config.MEDIA_PORT },
@@ -154,15 +132,11 @@ async function stop() {
   if (stopping) return;
   stopping = true;
   abort.abort();
-  clearInterval(pruneTimer);
-  clearInterval(cleanupTimer);
-  clearInterval(jobCleanupTimer);
   const deadline = setTimeout(() => process.exit(1), 30000);
   deadline.unref();
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  await Promise.allSettled(workers);
-  await cleanup;
-  await jobCleanup;
+  await workers.catch(() => {});
+  await maintenance.stop();
   await application.close();
   await sql.end();
   clearTimeout(deadline);
