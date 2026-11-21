@@ -2,7 +2,7 @@
 
 **Status** Accepted
 
-Execution-record retention is amended by [ADR 0007](0007-retained-results-and-job-expiry.md). Lease fencing and checkpoint recovery remain required within that retention window.
+Execution-record retention is amended by [ADR 0007](0007-retained-results-and-job-expiry.md). Lease fencing and checkpoint recovery remain required within that retention window. [ADR 0013](0013-idle-database-quiet.md) sets when idle workers look for expired leases.
 
 ## Context
 

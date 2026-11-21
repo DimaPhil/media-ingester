@@ -7,6 +7,20 @@ describe('deployment configuration', () => {
     expect(() => loadConfig({ ...env, MEDIA_OWNER_TOKEN: 'secret' })).toThrow('MEDIA_OWNER_TOKEN');
     expect(loadConfig(env).MEDIA_PORT).toBe(4000);
   });
+  it('defaults idle polling and housekeeping to intervals a scale-to-zero database tolerates', () => {
+    const config = loadConfig(env);
+    expect(config.MEDIA_WORKER_IDLE_POLL_MS).toBe(30 * 60_000);
+    expect(config.MEDIA_MAINTENANCE_INTERVAL_MS).toBe(60 * 60_000);
+    expect(
+      loadConfig({ ...env, MEDIA_WORKER_IDLE_POLL_MS: '5000' }).MEDIA_WORKER_IDLE_POLL_MS,
+    ).toBe(5000);
+    expect(() => loadConfig({ ...env, MEDIA_WORKER_IDLE_POLL_MS: '10' })).toThrow(
+      'MEDIA_WORKER_IDLE_POLL_MS',
+    );
+    expect(() => loadConfig({ ...env, MEDIA_MAINTENANCE_INTERVAL_MS: '1000' })).toThrow(
+      'MEDIA_MAINTENANCE_INTERVAL_MS',
+    );
+  });
   it('accepts HTTPS origin and rejects insecure or ambiguous deployment addresses', () => {
     expect(
       loadConfig({ ...env, MEDIA_PUBLIC_URL: 'https://media.example/' }).MEDIA_PUBLIC_URL,

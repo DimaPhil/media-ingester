@@ -14,5 +14,6 @@
 | [0010 · Synthesize one answer for multi-chunk understanding](0010-whole-media-synthesis.md)    | Long-media understanding output                           |
 | [0011 · Let Gemini read public YouTube videos by URL](0011-gemini-youtube-urls.md)             | Remote media, source identity, Gemini input               |
 | [0012 · Lock Codex ASR only while a session starts](0012-parallel-codex-asr.md)                | Codex ASR concurrency, credential locks, speechless audio |
+| [0013 · Wake workers in process, keep the idle database quiet](0013-idle-database-quiet.md)    | Worker polling, background cleanup timers, Neon idle cost |
 
 These records explain accepted choices. For a change that alters a boundary or recovery guarantee, add a numbered record with status, context, decision, consequences, and links to the implementing code and tests. If a new decision replaces one here, mark the earlier record superseded and link both ways. Keep operational procedures in the [README](../../README.md) and implementation navigation in the [agent guide](../agent-context.md).

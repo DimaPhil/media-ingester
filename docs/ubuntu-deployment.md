@@ -10,6 +10,15 @@ The [Compose service](../docker-compose.yml) binds Media Ingest to host loopback
 | `TELEGRAM_PROXY_URL`   | The Telegram Proxy API origin reachable **from the worker container**. On the same Docker host, use the shared network configuration below and `http://telegram-proxy:4040`. On different hosts, use the proxy's HTTPS endpoint and verify container reachability.                                                                                   |
 | `TELEGRAM_PROXY_TOKEN` | The proxy operator's `API_BEARER_TOKEN` when proxy bearer authentication is enabled. Media Ingest sends it only to the configured Telegram proxy.                                                                                                                                                                                                    |
 
+## Keep an idle Neon compute suspended
+
+Neon suspends a compute after five minutes without queries; on the Free plan that delay is fixed and compute time counts against the monthly CU-hour allowance. Idle workers therefore issue no queries: submissions and retries wake them inside the API process, and housekeeping runs when the queue empties. Two optional settings control the remaining periodic queries ([ADR 0013](adr/0013-idle-database-quiet.md)). Both timers start together, so an idle service wakes the compute about twice an hour by default.
+
+- `MEDIA_WORKER_IDLE_POLL_MS` (default `1800000`, 30 minutes; 1000 to 86400000): fallback claim that recovers jobs whose lease expired without a process restart and jobs queued by another process. A job interrupted by a restart or deploy resumes about a minute after startup, once its lease expires. Values below five minutes keep a Neon compute awake.
+- `MEDIA_MAINTENANCE_INTERVAL_MS` (default `3600000`, one hour; 60000 to 86400000): fallback pass for completed-upload cleanup, 30-day job expiry and auth pruning.
+
+An open, visible `/admin` page refreshes every 4 seconds and keeps the compute awake while it is shown; close it or switch tabs when finished. Docker's `/healthz` check does not query the database.
+
 ## Check the routes
 
 On Ubuntu, run `tailscale serve status` to identify which external origin forwards to Media Ingest. A raw TCP forward to the HTTP listener does not provide HTTPS. Choose a free HTTPS listener or a dedicated hostname and route it to host port 4000. For example, if port 8446 is available, `tailscale serve --bg --https=8446 http://127.0.0.1:4000` creates a tailnet-only HTTPS listener. Set `MEDIA_PUBLIC_URL` to the exact HTTPS origin it reports with no path. The MCP endpoint is the origin plus `/mcp`. Test health and OAuth discovery through that same origin.
@@ -56,7 +65,7 @@ For the upload retention upgrade, stop every older API/worker instance sharing t
 
 Prepare the private service environment from [the example](../.env.example), back up the database and media volume, and configure the selected [providers](media-providers.md). Run the following in the reviewed Media Ingest checkout during deployment:
 
-For migration 003, stop every old API/worker before migrating. The migration backfills completed outputs into durable history and adds indexed terminal-job expiry. The new API requires migration 003 and starts bounded cleanup at startup, then every minute. Back up the database before enabling the 30-day cleanup policy.
+For migration 003, stop every old API/worker before migrating. The migration backfills completed outputs into durable history and adds indexed terminal-job expiry. The new API requires migration 003 and starts bounded cleanup at startup, then on the maintenance timer. Back up the database before enabling the 30-day cleanup policy.
 
 Migration 004 adds an index for result reuse ([ADR 0008](adr/0008-result-reuse.md)). It changes no data and older instances can keep running while it applies; run the explicit migration before or after starting the new version.
 

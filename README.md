@@ -89,7 +89,7 @@ Repeated requests reuse saved results indefinitely. A job for the same owner and
 
 Open your Media Ingest origin or `/admin` and enter the owner API token. The dashboard shows running/queued work, recent failed jobs with explicit retry, and paginated successful history. Open a saved result to read its output, translation, timestamps and media identifiers, or download text/JSON. The token stays in tab memory and is cleared on sign-out.
 
-Successful outputs and their media metadata are retained in `processed_media`. Completed and failed execution records, including checkpoints, expire after 30 days; active jobs are excluded. Cleanup runs at startup and every minute in batches of 100. Failed uploads remain available as standalone files when their job records expire. Successful-upload cleanup continues independently. History contains source links and available metadata, while raw media follows the existing file lifecycle.
+Successful outputs and their media metadata are retained in `processed_media`. Completed and failed execution records, including checkpoints, expire after 30 days; active jobs are excluded. Cleanup runs at startup and on the maintenance timer (`MEDIA_MAINTENANCE_INTERVAL_MS`, default hourly) in batches of 100. Failed uploads remain available as standalone files when their job records expire. Successful-upload cleanup continues independently. History contains source links and available metadata, while raw media follows the existing file lifecycle.
 
 ```sh
 media history

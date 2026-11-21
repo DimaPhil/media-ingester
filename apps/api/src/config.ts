@@ -23,6 +23,21 @@ const schema = z.object({
   MEDIA_WORK_ROOT: z.string().default('./.media'),
   MEDIA_WORKERS: z.coerce.number().int().min(1).max(16).default(2),
   MEDIA_CHUNK_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
+  // Idle workers sleep until a submission or retry wakes them; this fallback recovers expired
+  // leases and work from other processes. Keep it above the database's scale-to-zero delay.
+  MEDIA_WORKER_IDLE_POLL_MS: z.coerce
+    .number()
+    .int()
+    .min(1000)
+    .max(24 * 60 * 60_000)
+    .default(30 * 60_000),
+  // Fallback period for upload cleanup, terminal job expiry and auth pruning.
+  MEDIA_MAINTENANCE_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(60_000)
+    .max(24 * 60 * 60_000)
+    .default(60 * 60_000),
   MEDIA_MAX_DOWNLOAD_BYTES: z.coerce
     .number()
     .int()

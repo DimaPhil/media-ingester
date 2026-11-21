@@ -16,6 +16,7 @@ Use [architecture](architecture.md) for invariants and class hierarchies, [accep
 - Chunk boundaries fall in measured pauses; without one, neighbors overlap and aggregation stitches them. Saved plans stay authoritative. Audio-only providers download audio-only formats. See [ADR 0009](adr/0009-pause-aligned-chunks.md).
 - Exactly silent decoded audio skips subscription ASR. Check for all-zero samples before attributing a transcript to Codex. On nonzero audio, an empty transcript is valid only when Codex opened no speech turn; missing words after a turn remain an error. Codex ASR holds the credential lock only until its session connects. See [ADR 0012](adr/0012-parallel-codex-asr.md).
 - Multi-chunk understanding ends with one whole-media synthesis call ([ADR 0010](adr/0010-whole-media-synthesis.md)). Gemini reads public YouTube videos by URL, identified by site media ID ([ADR 0011](adr/0011-gemini-youtube-urls.md)).
+- The Neon Free compute must be able to scale to zero. Idle workers and housekeeping issue no queries more often than the configured fallback timers; submit/retry wake workers in process. No `LISTEN/NOTIFY`. See [ADR 0013](adr/0013-idle-database-quiet.md).
 
 ```mermaid
 flowchart LR
@@ -36,14 +37,14 @@ flowchart LR
 | Area                                                  | Owning source                                                                                                            |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | Wire DTOs, provider IDs, operation catalog            | `packages/contracts/src/media.ts`, `operations.ts`, `documents.ts`                                                       |
-| Durable jobs, interfaces, chunk planning, aggregation | `packages/sdk/src/ports.ts`, `sdk.ts`, `worker.ts`, `chunks.ts`                                                          |
+| Durable jobs, interfaces, chunk planning, aggregation | `packages/sdk/src/ports.ts`, `sdk.ts`, `worker.ts`, `workers.ts`, `chunks.ts`                                            |
 | Result reuse policy                                   | `packages/sdk/src/cache.ts`, `worker.ts`, `packages/adapters/src/postgres.ts`                                            |
 | Retained results, job expiry and admin UI             | `packages/sdk/src/history.ts`, `packages/adapters/src/job-retention.ts`, `apps/api/src/admin-page.ts`, `admin-client.ts` |
 | Source registration and implementations               | `packages/adapters/src/sources.ts`, `sources/`, `source-registry.ts`                                                     |
 | Media inspection, model routing and API providers     | `packages/adapters/src/media.ts`, `providers.ts`, `providers/`                                                           |
 | Subscription audio                                    | `packages/adapters/src/codex-audio.ts`, `codex-realtime.ts`, `codex-app-server.ts`                                       |
 | Subscription understanding and process isolation      | `packages/adapters/src/subscription-understanding.ts`, `subscription-media.ts`, `subscription-runtime.ts`                |
-| Server config and composition                         | `apps/api/src/config.ts`, `main.ts`                                                                                      |
+| Server config and composition                         | `apps/api/src/config.ts`, `main.ts`, `background.ts`                                                                     |
 | HTTP middleware, REST/MCP and shared dispatch         | `apps/api/src/application.ts`, `rest.ts`, `mcp.ts`, `operations.ts`                                                      |
 | Owner and OAuth authentication                        | `apps/api/src/auth/`                                                                                                     |
 | HTTP client and distributable CLI                     | `packages/client`, `packages/cli`                                                                                        |

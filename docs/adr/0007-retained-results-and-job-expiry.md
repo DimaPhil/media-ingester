@@ -1,6 +1,6 @@
 # ADR 0007 · Keep processed outputs and expire terminal job records
 
-**Status** Accepted. Amends the retention aspect of [ADR 0003](0003-worker-recovery.md).
+**Status** Accepted. Amends the retention aspect of [ADR 0003](0003-worker-recovery.md). The every-minute janitor schedule is superseded by [ADR 0013](0013-idle-database-quiet.md).
 
 ## Context
 
