@@ -76,21 +76,28 @@ describe('worker loops', () => {
     await settle();
     expect(claim).toHaveBeenCalledTimes(2);
     expect(onIdle).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 1);
-    expect(claim).toHaveBeenCalledTimes(2);
+    // One extra look just after a previous process's lease would have expired.
+    await vi.advanceTimersByTimeAsync(61_000);
+    await settle();
+    expect(claim).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 61_001);
+    expect(claim).toHaveBeenCalledTimes(4);
     await vi.advanceTimersByTimeAsync(1);
     await settle();
     // Both workers share one fallback timer, so they wake the database together.
-    expect(claim).toHaveBeenCalledTimes(4);
+    expect(claim).toHaveBeenCalledTimes(6);
     await vi.advanceTimersByTimeAsync(3 * IDLE_POLL_MS);
     await settle();
-    expect(claim).toHaveBeenCalledTimes(10);
+    expect(claim).toHaveBeenCalledTimes(12);
     await loops.stop();
   });
 
   it('wakes an idle worker as soon as a job is submitted and drains the queue', async () => {
     const { sdk, claim } = fixture();
     const loops = start(sdk);
+    await settle();
+    // Past the one-time look for leases left by a previous process.
+    await vi.advanceTimersByTimeAsync(61_000);
     await settle();
     const startedAt = Date.now();
     const first = await sdk.submit('alice', request);
@@ -99,8 +106,9 @@ describe('worker loops', () => {
     expect((await sdk.get('alice', first.id)).status).toBe('completed');
     expect((await sdk.get('alice', second.id)).status).toBe('completed');
     expect(Date.now() - startedAt).toBeLessThan(1000);
+    // Until the first fallback poll, no further claims happen.
     const claims = claim.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 1000);
+    await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - (Date.now() - startedAt) - 63_000);
     expect(claim).toHaveBeenCalledTimes(claims);
     await loops.stop();
   });
@@ -148,6 +156,29 @@ describe('worker loops', () => {
     const recovered = await sdk.get('alice', job.id);
     expect(recovered.status).toBe('completed');
     expect(recovered.attempt).toBe(2);
+    await loops.stop();
+  });
+
+  it('recovers a job interrupted by a restart once its lease expires, not at the fallback poll', async () => {
+    const repository = new MemoryJobRepository();
+    const previous = fixture(repository);
+    const job = await previous.sdk.submit('alice', request);
+    // The previous process claimed the job and stopped before finishing it.
+    await repository.claim(Date.now(), 60_000);
+    const { sdk, claim } = fixture(repository);
+    const loops = start(sdk);
+    await settle();
+    expect((await sdk.get('alice', job.id)).status).toBe('running');
+    const startupClaims = claim.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_999);
+    expect(claim).toHaveBeenCalledTimes(startupClaims);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect((await sdk.get('alice', job.id)).status).toBe('completed');
+    // The extra look happens only once.
+    const claims = claim.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 62_000);
+    expect(claim).toHaveBeenCalledTimes(claims);
     await loops.stop();
   });
 

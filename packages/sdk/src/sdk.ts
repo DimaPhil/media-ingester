@@ -113,9 +113,15 @@ export class MediaSdk {
   /**
    * Runs worker loops until `options.signal` aborts. Each loop drains claimable jobs, then sleeps
    * without touching the repository until `submit`, `retry` or `wake` is called, or until the
-   * shared `idlePollMs` fallback fires. Every loop looks for work once at startup.
+   * shared `idlePollMs` fallback fires. Every loop looks for work at startup and again once a
+   * lease held by a previous process must have expired.
    */
   runWorkers(options: WorkerLoopOptions): Promise<void> {
-    return runWorkerLoops((signal) => this.runNext(signal), this.work, options);
+    return runWorkerLoops(
+      (signal) => this.runNext(signal),
+      this.work,
+      options,
+      this.options.leaseMs ?? 60000,
+    );
   }
 }

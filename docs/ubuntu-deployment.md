@@ -14,7 +14,7 @@ The [Compose service](../docker-compose.yml) binds Media Ingest to host loopback
 
 Neon suspends a compute after five minutes without queries; on the Free plan that delay is fixed and compute time counts against the monthly CU-hour allowance. Idle workers therefore issue no queries: submissions and retries wake them inside the API process, and housekeeping runs when the queue empties. Two optional settings control the remaining periodic queries ([ADR 0013](adr/0013-idle-database-quiet.md)). Both timers start together, so an idle service wakes the compute about twice an hour by default.
 
-- `MEDIA_WORKER_IDLE_POLL_MS` (default `1800000`, 30 minutes; 1000 to 86400000): fallback claim that recovers jobs whose lease expired without a process restart and jobs queued by another process. Values below five minutes keep a Neon compute awake.
+- `MEDIA_WORKER_IDLE_POLL_MS` (default `1800000`, 30 minutes; 1000 to 86400000): fallback claim that recovers jobs whose lease expired without a process restart and jobs queued by another process. A job interrupted by a restart or deploy resumes about a minute after startup, once its lease expires. Values below five minutes keep a Neon compute awake.
 - `MEDIA_MAINTENANCE_INTERVAL_MS` (default `3600000`, one hour; 60000 to 86400000): fallback pass for completed-upload cleanup, 30-day job expiry and auth pruning.
 
 An open, visible `/admin` page refreshes every 4 seconds and keeps the compute awake while it is shown; close it or switch tabs when finished. Docker's `/healthz` check does not query the database.

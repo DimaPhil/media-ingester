@@ -61,6 +61,8 @@ export async function runWorkerLoops(
   runNext: (signal: AbortSignal) => Promise<boolean>,
   wake: WorkSignal,
   options: WorkerLoopOptions,
+  /** Lease length. A job left running by a stopped process becomes claimable once it expires. */
+  leaseMs?: number,
 ): Promise<void> {
   const { workers, idlePollMs, signal } = options;
   if (!Number.isInteger(workers) || workers < 1 || !Number.isFinite(idlePollMs) || idlePollMs <= 0)
@@ -68,7 +70,15 @@ export async function runWorkerLoops(
   // One shared timer keeps every worker's fallback claim in the same database wake-up.
   const poll = setInterval(() => wake.notify(), idlePollMs);
   poll.unref?.();
-  const stop = () => clearInterval(poll);
+  // After a restart, a job interrupted by the previous process still holds an unexpired lease,
+  // so the startup claim misses it. Look once more just after any such lease must have expired.
+  const restart =
+    leaseMs === undefined ? undefined : setTimeout(() => wake.notify(), leaseMs + 1000);
+  restart?.unref?.();
+  const stop = () => {
+    clearInterval(poll);
+    clearTimeout(restart);
+  };
   signal.addEventListener('abort', stop, { once: true });
   const maxErrorDelayMs = Math.min(MAX_ERROR_DELAY_MS, idlePollMs);
   const loop = async () => {
