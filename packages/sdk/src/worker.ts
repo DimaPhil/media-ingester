@@ -3,6 +3,7 @@ import { findReusableResult, RESULT_CACHE_CANDIDATES } from './cache.js';
 import { aggregate, NO_PAUSES, planChunks, validateChunk } from './chunks.js';
 import { synthesisParts, synthesizeWhole } from './synthesis.js';
 import { MediaError, LeaseLostError } from './errors.js';
+import { describeFailure, type RunningStage } from './job-view.js';
 import type {
   AdapterContext,
   Chunk,
@@ -14,6 +15,18 @@ import type {
   ResultLookup,
   SdkOptions,
 } from './ports.js';
+
+/** Where the current attempt is; failures record it with the chunk being processed, if any. */
+interface Progress {
+  stage: RunningStage;
+  /** Chunk context for errors thrown while processing one chunk. */
+  chunkErrors: WeakMap<object, Record<string, number>>;
+}
+const providerStages: ReadonlySet<RunningStage> = new Set([
+  'processing',
+  'synthesizing',
+  'translating',
+]);
 
 /** Everything the chunk loop needs, whether the provider reads local or remote media. */
 interface Prepared {
@@ -73,6 +86,7 @@ export class JobWorker {
     };
     let heartbeat: Promise<void> | undefined;
     let leaseLost = false;
+    const progress: Progress = { stage: 'resolving', chunkErrors: new WeakMap() };
     const timer = setInterval(() => {
       if (heartbeat || abort.signal.aborted) return;
       heartbeat = this.repository
@@ -87,23 +101,23 @@ export class JobWorker {
     }, this.heartbeatMs);
     timer.unref?.();
     try {
-      await this.process(lease, context, abort);
+      await this.process(lease, context, abort, progress);
     } catch (error) {
       if (error instanceof LeaseLostError) leaseLost = true;
       if (!leaseLost && !signal?.aborted) {
+        const failure = describeFailure(error, {
+          stage: progress.stage,
+          attempt: job.attempt,
+          ...(providerStages.has(progress.stage)
+            ? { provider: job.request.provider, model: job.request.model }
+            : {}),
+          ...(error && typeof error === 'object' ? progress.chunkErrors.get(error) : undefined),
+        });
         try {
-          this.options.onProcessingError?.(job.id, error);
+          this.options.onProcessingError?.(job.id, error, failure);
         } catch {
           /* Observability must not prevent durable failure recording. */
         }
-        const failure =
-          error instanceof MediaError
-            ? { code: error.code, message: error.message, retryable: error.retryable }
-            : {
-                code: 'processing_failed',
-                message: 'Media processing failed; check server logs',
-                retryable: true,
-              };
         try {
           await this.repository.fail(job.id, token, failure, this.now());
         } catch (writeError) {
@@ -129,8 +143,14 @@ export class JobWorker {
     lease: Lease,
     context: AdapterContext,
     abort: AbortController,
+    progress: Progress,
   ): Promise<void> {
     const { job, token } = lease;
+    /** Records a slow step before starting it: a few fenced writes per job, never per chunk. */
+    const enter = async (stage: RunningStage) => {
+      progress.stage = stage;
+      await this.repository.saveStage?.(job.id, token, stage, this.now());
+    };
     const source = await this.options.sources.resolve(job.request.source, context);
     abort.signal.throwIfAborted();
     // A stable site ID lets a retained result skip the download entirely.
@@ -142,7 +162,8 @@ export class JobWorker {
     )
       return;
     const prepared =
-      this.remote(lease, source, context) ?? (await this.local(lease, source, context, abort));
+      this.remote(lease, source, context) ??
+      (await this.local(lease, source, context, abort, enter));
     if (!prepared) return;
     abort.signal.throwIfAborted();
     const { inspection } = prepared;
@@ -156,6 +177,7 @@ export class JobWorker {
       );
     if (job.plan && job.plan.at(-1)?.endMs !== inspection.durationMs)
       throw new MediaError('source_changed', 'Source duration changed since the saved plan');
+    progress.stage = 'processing';
     await this.repository.savePlan(job.id, token, plan, prepared.fingerprint, this.now());
     let cursor = 0;
     const pending = plan.filter((chunk) => !job.chunks[String(chunk.index)]);
@@ -164,9 +186,20 @@ export class JobWorker {
         abort.signal.throwIfAborted();
         const chunk = pending[cursor++];
         if (!chunk) break;
-        const output = await prepared.run(chunk);
-        abort.signal.throwIfAborted();
-        const validated = validateChunk(output, job.request, chunk);
+        let validated: ChunkOutput;
+        try {
+          const output = await prepared.run(chunk);
+          abort.signal.throwIfAborted();
+          validated = validateChunk(output, job.request, chunk);
+        } catch (error) {
+          if (error && typeof error === 'object' && !progress.chunkErrors.has(error))
+            progress.chunkErrors.set(error, {
+              chunkIndex: chunk.index,
+              chunkStartMs: chunk.startMs,
+              chunkEndMs: chunk.endMs,
+            });
+          throw error;
+        }
         await this.repository.saveChunk(job.id, token, chunk.index, validated, this.now());
         job.chunks[String(chunk.index)] = validated;
       }
@@ -175,8 +208,13 @@ export class JobWorker {
     await Promise.all(runners.map((runner) => runner.catch((error) => abort.abort(error))));
     abort.signal.throwIfAborted();
     const result = aggregate(plan, job.chunks, job.request);
-    if (job.request.kind === 'understanding' && plan.length > 1) {
+    if (
+      job.request.kind === 'understanding' &&
+      plan.length > 1 &&
+      this.options.provider.synthesize
+    ) {
       // Chunk answers see only their span; one more call answers the task for the whole media.
+      await enter('synthesizing');
       const whole = await synthesizeWhole(
         this.options.provider,
         synthesisParts(plan, job.chunks),
@@ -193,6 +231,7 @@ export class JobWorker {
     if (job.request.targetLanguage) {
       if (!this.options.provider.translate)
         throw new MediaError('unsupported_translation', 'Provider does not support translation');
+      await enter('translating');
       result.translatedText = await this.options.provider.translate(
         result.text,
         job.request,
@@ -245,8 +284,10 @@ export class JobWorker {
     source: ResolvedSource,
     context: AdapterContext,
     abort: AbortController,
+    enter: (stage: RunningStage) => Promise<void>,
   ): Promise<Prepared | undefined> {
     const { job } = lease;
+    await enter('downloading');
     const audioOnly = this.options.provider.sourceMedia?.(job.request) === 'audio';
     const artifact = await this.options.sources.materialize(
       source,
@@ -263,19 +304,23 @@ export class JobWorker {
       );
     if (await this.reuse(lease, { fingerprint: artifact.fingerprint }, abort.signal))
       return undefined;
+    await enter('inspecting');
     const inspection = await this.options.media.inspect(artifact, context);
     if (job.request.kind === 'transcription' && !inspection.hasAudio)
       throw new MediaError('invalid_media', 'Source has no audio');
     const inputFormat =
       this.options.provider.inputFormat?.(job.request, inspection) ?? job.request.kind;
     // A saved plan is authoritative; analysis only shapes the first attempt's boundaries.
-    const loudness =
+    let loudness: LoudnessProfile | undefined;
+    if (
       !job.plan &&
       inspection.hasAudio &&
       inspection.durationMs > this.options.provider.chunkDurationMs(job.request) &&
       this.options.media.loudness
-        ? await this.options.media.loudness(artifact, context)
-        : undefined;
+    ) {
+      await enter('planning');
+      loudness = await this.options.media.loudness(artifact, context);
+    }
     return {
       fingerprint: artifact.fingerprint,
       inspection,

@@ -9,7 +9,8 @@ import {
   operations,
   RELEASE_VERSION,
 } from '@media-ingest/contracts';
-import { createProgram, inferSource } from '../src/cli.js';
+import { createProgram, inferSource, runCli } from '../src/cli.js';
+import { commandExamples, renderStep } from '../src/output.js';
 import { complete, completionScript } from '../src/completion.js';
 import { configPath, loadConfig, saveConfig } from '../src/config.js';
 
@@ -221,5 +222,176 @@ describe('CLI contract', () => {
       expect(
         operations[id as keyof typeof operations].input.safeParse(JSON.parse(text!)).success,
       ).toBe(true);
+  });
+});
+
+describe('agent-facing CLI output', () => {
+  const id = '00000000-0000-4000-8000-000000000000';
+  async function exec(args: string[], env: Record<string, string> = {}) {
+    const home = await mkdtemp(join(tmpdir(), 'media-cli-'));
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runCli(['node', 'media', ...args], {
+      out: (value) => out.push(value),
+      err: (value) => err.push(value),
+      stdin: async () => '',
+      env: {
+        HOME: home,
+        MEDIA_API_URL: 'https://media.example.com',
+        MEDIA_API_TOKEN: 'not-printed',
+        ...env,
+      },
+    });
+    return { code, out: out.join('\n'), err: err.join('\n') };
+  }
+  const job = {
+    id,
+    request: {
+      kind: 'transcription',
+      source: { kind: 'http', uri: 'https://example.com/a.mp3' },
+      provider: 'google-gemini',
+      model: 'gemini-2.5-flash',
+    },
+    createdAt: '2026-10-24T00:00:00.000Z',
+    updatedAt: '2026-10-24T00:00:00.000Z',
+    attempt: 1,
+    result: null,
+  };
+
+  it('reports usage errors as JSON with valid options and exit code 2', async () => {
+    const unknown = await exec(['get', '--fo']);
+    expect(unknown.code).toBe(2);
+    expect(JSON.parse(unknown.out)).toEqual({
+      error: { code: 'usage_error', message: "unknown option '--fo'", details: { command: 'get' } },
+      help: ['media get --help', 'Valid options: --input <json>, --file <path>, -h, --help'],
+    });
+    const missing = await exec(['transcribe']);
+    expect(missing.code).toBe(2);
+    expect(JSON.parse(missing.out).error.message).toContain("missing required argument 'source'");
+    const command = await exec(['bogus']);
+    expect(command.code).toBe(2);
+    expect(JSON.parse(command.out).help[1]).toContain('transcribe');
+    const invalid = await exec(['transcribe', 'https://x.test/a', '--provider', 'bogus']);
+    expect(invalid.code).toBe(2);
+    expect(JSON.parse(invalid.out).error.code).toBe('invalid_input');
+    const local = await exec(['list', '--input', '[]']);
+    expect(local).toMatchObject({ code: 2 });
+    expect(JSON.parse(local.out).error).toEqual({
+      code: 'usage_error',
+      message: 'Input must be a JSON object',
+    });
+    expect(await exec(['--help'])).toMatchObject({ code: 0 });
+    expect(await exec(['--version'])).toMatchObject({ code: 0, out: RELEASE_VERSION });
+  });
+
+  it('reports API failures with the server code, HTTP status and a hint, exit code 1', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          Response.json(
+            { error: { code: 'not_found', message: 'Job not found <script>' } },
+            { status: 404 },
+          ),
+        )
+        .mockResolvedValueOnce(Response.json({ error: { code: 'BAD CODE' } }, { status: 401 })),
+    );
+    const missing = await exec(['get', id]);
+    expect(missing.code).toBe(1);
+    expect(JSON.parse(missing.out)).toEqual({
+      error: { code: 'not_found', message: 'Resource not found.', details: { httpStatus: 404 } },
+      help: ['media list  # find the job ID'],
+    });
+    const denied = await exec(['list']);
+    expect(denied.code).toBe(1);
+    expect(JSON.parse(denied.out)).toMatchObject({
+      error: { code: 'http_error', details: { httpStatus: 401 } },
+      help: [expect.stringContaining('media setup')],
+    });
+    expect(missing.out + denied.out).not.toContain('not-printed');
+  });
+
+  it('adds help commands rendered from next steps to job views', async () => {
+    const failed = {
+      ...job,
+      status: 'failed',
+      stage: 'failed',
+      completedChunks: 4,
+      totalChunks: 18,
+      error: {
+        code: 'provider_invalid_output',
+        message: 'google-gemini returned unusable output: response is not valid JSON',
+        retryable: true,
+        details: { provider: 'google-gemini', chunkIndex: 4, parseErrorPosition: 11848 },
+        nextSteps: [
+          { operation: 'retry', input: { id }, reason: 'retry reuses 4 completed chunks' },
+          {
+            operation: 'submit',
+            input: { request: { ...job.request, model: undefined, provider: 'openai' } },
+            reason: "Process with openai instead; uses that provider's quota",
+          },
+        ],
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(Response.json(failed)));
+    const shown = await exec(['get', id]);
+    expect(shown.code).toBe(0);
+    const value = JSON.parse(shown.out);
+    expect(value.error.nextSteps).toHaveLength(2);
+    expect(value.help).toEqual([
+      `media retry ${id}  # retry reuses 4 completed chunks`,
+      // A quote in the trailing comment needs no escaping; the shell ignores comments.
+      `media submit --input '{"request":{"kind":"transcription","source":{"kind":"http","uri":"https://example.com/a.mp3"},"provider":"openai"}}'  # Process with openai instead; uses that provider's quota`,
+    ]);
+    const running = {
+      ...job,
+      status: 'running',
+      stage: 'processing',
+      completedChunks: 3,
+      totalChunks: 18,
+      error: null,
+      nextSteps: [
+        {
+          operation: 'get',
+          input: { id },
+          reason: 'Job is processing (3/18 chunks done)',
+          pollAfterSeconds: 30,
+        },
+      ],
+    };
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(Response.json(running)));
+    expect(JSON.parse((await exec(['get', id])).out).help).toEqual([
+      `media get ${id}  # after 30s: Job is processing (3/18 chunks done)`,
+    ]);
+    const completed = { ...running, status: 'completed', stage: 'completed', nextSteps: undefined };
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(Response.json(completed)));
+    expect(JSON.parse((await exec(['get', id])).out)).not.toHaveProperty('help');
+  });
+
+  it('quotes JSON inputs safely for the shell', () => {
+    expect(
+      renderStep({ operation: 'resolve', input: { source: { uri: "it's" } }, reason: 'check' }),
+    ).toBe(`media resolve --input '{"source":{"uri":"it'\\''s"}}'  # check`);
+  });
+
+  it('shows examples in per-command help and keeps their JSON valid for the catalog', async () => {
+    const help = await exec(['get', '--help']);
+    expect(help.code).toBe(0);
+    expect(help.out).toContain('Examples:');
+    expect(help.out).toContain(`media get ${id}`);
+    for (const [name, lines] of Object.entries(commandExamples)) {
+      expect(lines.length).toBeGreaterThan(0);
+      expect(lines.length).toBeLessThanOrEqual(3);
+      for (const line of lines) {
+        const sample = /^media (\w+) --input '([^']+)'$/u.exec(line);
+        if (sample)
+          expect(
+            operations[sample[1] as keyof typeof operations].input.safeParse(JSON.parse(sample[2]!))
+              .success,
+            `${name}: ${line}`,
+          ).toBe(true);
+      }
+    }
   });
 });

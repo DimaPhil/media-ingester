@@ -1,25 +1,29 @@
 import { readFile, stat } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { MediaRequest, ResolvedSource } from '@media-ingest/contracts';
-import type {
-  AdapterContext,
-  Artifact,
-  Chunk,
-  ChunkOutput,
-  MediaInputFormat,
-  MediaInspection,
-  RemoteMedia,
-  SynthesisInput,
-  SynthesisOutput,
+import { z } from 'zod';
+import type { ErrorDetails, MediaRequest, ResolvedSource } from '@media-ingest/contracts';
+import {
+  MediaError,
+  type AdapterContext,
+  type Artifact,
+  type Chunk,
+  type ChunkOutput,
+  type MediaInputFormat,
+  type MediaInspection,
+  type RemoteMedia,
+  type SynthesisInput,
+  type SynthesisOutput,
 } from '@media-ingest/sdk';
 import { ApiProvider } from './api-provider.js';
 import {
   checked,
+  conform,
+  decodeModelJson,
+  invalidOutput,
   key,
   parseChunk,
-  parseModelJson,
   parseSynthesis,
-  parseTranslation,
+  readJson,
   synthesisPrompt,
 } from './shared.js';
 
@@ -30,6 +34,7 @@ interface GeminiFile {
   state?: string;
 }
 const geminiRoot = 'https://generativelanguage.googleapis.com';
+const provider = 'google-gemini';
 const defaultTranscriptionModel = 'gemini-2.5-flash';
 interface GeminiOptions {
   apiKey?: string;
@@ -52,15 +57,17 @@ export class GeminiProvider extends ApiProvider {
   static translator(options: GeminiOptions) {
     const model =
       options.translationModel ?? options.transcriptionModel ?? defaultTranscriptionModel;
-    return async (prompt: string, signal: AbortSignal) =>
-      parseTranslation(
-        await generateGemini(
-          model,
-          key(options.apiKey, 'GEMINI_API_KEY'),
-          [{ text: prompt }],
-          signal,
-        ),
+    return async (prompt: string, signal: AbortSignal) => {
+      const apiKey = key(options.apiKey, 'GEMINI_API_KEY');
+      const output = await generateJson(
+        () => generateGemini(model, apiKey, [{ text: prompt }], signal, schemas.translation),
+        (value, details) => ({
+          value: conform(value, (raw) => translationSchema.parse(raw), provider, details),
+          retry: false,
+        }),
       );
+      return output.translatedText;
+    };
   }
 
   constructor(
@@ -116,23 +123,25 @@ export class GeminiProvider extends ApiProvider {
     const seconds = (ms: number) => `${ms / 1000}s`;
     const model = this.resolveModel(request);
     const apiKey = key(this.options.apiKey, 'GEMINI_API_KEY');
-    const signal = this.signal(context);
     const clip = { startMs: chunk.startMs, endMs: chunk.endMs };
-    return withinClip(clip, () =>
-      generateGemini(
-        model,
-        apiKey,
-        [
-          { text: instructions(request, clip) },
-          {
-            file_data: { file_uri: media.uri },
-            video_metadata: {
-              start_offset: seconds(chunk.startMs),
-              end_offset: seconds(chunk.endMs),
+    return this.withDeadline(context, (signal) =>
+      withinClip(clip, () =>
+        generateGemini(
+          model,
+          apiKey,
+          [
+            { text: instructions(request, clip) },
+            {
+              file_data: { file_uri: media.uri },
+              video_metadata: {
+                start_offset: seconds(chunk.startMs),
+                end_offset: seconds(chunk.endMs),
+              },
             },
-          },
-        ],
-        signal,
+          ],
+          signal,
+          chunkSchema(request),
+        ),
       ),
     );
   }
@@ -143,13 +152,24 @@ export class GeminiProvider extends ApiProvider {
     request: MediaRequest,
     context: AdapterContext,
   ): Promise<SynthesisOutput> {
-    const text = await generateGemini(
-      this.resolveModel(request),
-      key(this.options.apiKey, 'GEMINI_API_KEY'),
-      [{ text: synthesisPrompt(input, request) }],
-      this.signal(context),
+    const model = this.resolveModel(request);
+    const apiKey = key(this.options.apiKey, 'GEMINI_API_KEY');
+    return this.withDeadline(context, (signal) =>
+      generateJson(
+        () =>
+          generateGemini(
+            model,
+            apiKey,
+            [{ text: synthesisPrompt(input, request) }],
+            signal,
+            schemas.synthesis,
+          ),
+        (value, details) => ({
+          value: conform(value, parseSynthesis, provider, details),
+          retry: false,
+        }),
+      ),
     );
-    return parseSynthesis(parseModelJson(text));
   }
 
   async process(
@@ -158,52 +178,81 @@ export class GeminiProvider extends ApiProvider {
     context: AdapterContext,
   ): Promise<ChunkOutput> {
     const model = this.resolveModel(request);
-    const signal = this.signal(context);
     const apiKey = key(this.options.apiKey, 'GEMINI_API_KEY');
+    return this.withDeadline(context, (signal) =>
+      this.processUpload(artifact, request, model, apiKey, signal),
+    );
+  }
+
+  private async processUpload(
+    artifact: Artifact,
+    request: MediaRequest,
+    model: string,
+    apiKey: string,
+    signal: AbortSignal,
+  ): Promise<ChunkOutput> {
     const size = (await stat(artifact.uri)).size;
-    if (size > 1024 * 1024 * 1024) throw new Error('Gemini chunk exceeds 1 GiB');
+    if (size > 1024 * 1024 * 1024)
+      throw new MediaError('media_too_large', 'Gemini chunk exceeds 1 GiB', false, { provider });
     const mimeType =
       artifact.mimeType ?? (request.kind === 'understanding' ? 'video/mp4' : 'audio/mpeg');
-    const start = await checked(`${geminiRoot}/upload/v1beta/files`, {
-      method: 'POST',
-      signal,
-      headers: {
-        'x-goog-api-key': apiKey,
-        'x-goog-upload-protocol': 'resumable',
-        'x-goog-upload-command': 'start',
-        'x-goog-upload-header-content-length': String(size),
-        'x-goog-upload-header-content-type': mimeType,
-        'content-type': 'application/json',
+    const start = await checked(
+      `${geminiRoot}/upload/v1beta/files`,
+      {
+        method: 'POST',
+        signal,
+        headers: {
+          'x-goog-api-key': apiKey,
+          'x-goog-upload-protocol': 'resumable',
+          'x-goog-upload-command': 'start',
+          'x-goog-upload-header-content-length': String(size),
+          'x-goog-upload-header-content-type': mimeType,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ file: { display_name: artifact.fileName } }),
       },
-      body: JSON.stringify({ file: { display_name: artifact.fileName } }),
-    });
+      provider,
+    );
     const uploadUrl = start.headers.get('x-goog-upload-url');
-    if (!uploadUrl || new URL(uploadUrl).origin !== geminiRoot)
-      throw new Error('Invalid Gemini upload URL');
-    const upload = await checked(uploadUrl, {
-      method: 'POST',
-      signal,
-      headers: {
-        'x-goog-upload-offset': '0',
-        'x-goog-upload-command': 'upload, finalize',
-        'content-type': mimeType,
+    if (!uploadUrl || URL.parse(uploadUrl)?.origin !== geminiRoot)
+      throw invalidOutput(provider, 'invalid upload URL');
+    const upload = await checked(
+      uploadUrl,
+      {
+        method: 'POST',
+        signal,
+        headers: {
+          'x-goog-upload-offset': '0',
+          'x-goog-upload-command': 'upload, finalize',
+          'content-type': mimeType,
+        },
+        body: await readFile(artifact.uri),
       },
-      body: await readFile(artifact.uri),
-    });
-    let file = ((await upload.json()) as { file: GeminiFile }).file;
+      provider,
+    );
+    let file = ((await readJson(upload, provider, signal)) as { file?: GeminiFile } | null)?.file;
     if (!file?.name || !/^files\/[\w-]+$/.test(file.name))
-      throw new Error('Invalid Gemini file response');
+      throw invalidOutput(provider, 'invalid file upload response');
     const name = file.name;
     try {
       while (file.state === 'PROCESSING') {
         await delay(1000, undefined, { signal });
-        const response = await checked(`${geminiRoot}/v1beta/${name}`, {
-          signal,
-          headers: { 'x-goog-api-key': apiKey },
-        });
-        file = (await response.json()) as GeminiFile;
+        const response = await checked(
+          `${geminiRoot}/v1beta/${name}`,
+          { signal, headers: { 'x-goog-api-key': apiKey } },
+          provider,
+        );
+        file = ((await readJson(response, provider, signal)) ?? {}) as GeminiFile;
       }
-      if (file.state !== 'ACTIVE' || !file.uri) throw new Error('Gemini media processing failed');
+      if (file.state !== 'ACTIVE' || !file.uri) {
+        const state = /^[A-Z_]{1,40}$/.test(file.state ?? '') ? file.state! : 'UNKNOWN';
+        throw new MediaError(
+          'provider_rejected',
+          `Gemini media processing failed (file state ${state})`,
+          false,
+          { provider, model, fileState: state },
+        );
+      }
       const fileUri = file.uri;
       const clip = { startMs: 0, endMs: artifact.durationMs };
       return await withinClip(clip, () =>
@@ -215,6 +264,7 @@ export class GeminiProvider extends ApiProvider {
             { file_data: { mime_type: mimeType, file_uri: fileUri } },
           ],
           signal,
+          chunkSchema(request),
         ),
       );
     } finally {
@@ -229,7 +279,8 @@ export class GeminiProvider extends ApiProvider {
   }
 }
 
-const clipAttempts = 3;
+/** Calls per chunk, synthesis or translation, shared by unusable output and drifting timestamps. */
+const generationAttempts = 3;
 
 /** The span of the source video a call sees. Gemini labels frames on the source video's timeline. */
 interface Clip {
@@ -239,12 +290,38 @@ interface Clip {
 
 /**
  * Gemini's timestamps are approximate, and some calls still drift outside the clip. Such output is
- * requested again, up to three calls in total; the worker rejects whatever remains.
+ * requested again within the shared call budget; the worker rejects whatever remains.
  */
-async function withinClip(clip: Clip, generate: () => Promise<string>): Promise<ChunkOutput> {
-  for (let attempt = 1; ; attempt += 1) {
-    const output = toClipTime(parseModelJson(await generate()), clip);
-    if (output.inside || attempt >= clipAttempts) return parseChunk(output.value);
+function withinClip(clip: Clip, generate: () => Promise<GeminiReply>): Promise<ChunkOutput> {
+  return generateJson(generate, (value, details) => {
+    const output = toClipTime(value, clip);
+    return { value: conform(output.value, parseChunk, provider, details), retry: !output.inside };
+  });
+}
+
+/**
+ * Requests JSON until `accept` takes it, at most three calls. Unusable output (invalid JSON or
+ * missing fields) is asked for again; blocked, truncated and HTTP failures are not.
+ */
+export async function generateJson<T>(
+  generate: () => Promise<GeminiReply>,
+  accept: (value: unknown, details: ErrorDetails) => { value: T; retry: boolean },
+): Promise<T> {
+  for (let call = 1; ; call += 1) {
+    let accepted: { value: T; retry: boolean };
+    try {
+      const reply = await generate();
+      const details = { ...reply.details, calls: call };
+      accepted = accept(decodeModelJson(reply.text, provider, details), details);
+    } catch (error) {
+      if (!(error instanceof MediaError) || error.code !== 'provider_invalid_output') throw error;
+      if (call < generationAttempts) continue;
+      throw new MediaError(error.code, error.message, error.retryable, {
+        ...error.details,
+        calls: call,
+      });
+    }
+    if (!accepted.retry || call >= generationAttempts) return accepted.value;
   }
 }
 
@@ -318,12 +395,142 @@ function instructions(request: MediaRequest, clip: Clip): string {
   return `${task}\nYou are given only the part of the video from ${from} to ${to}. Describe only what is in this part. Write timestamps as MM:SS (or MM:SS.mmm) on the video's own timeline, as shown with the frames, so every interval satisfies ${from} <= start <= end <= ${to}. Never guess timestamps.`;
 }
 
+type JsonSchema = Record<string, unknown>;
+const text = { type: 'string' };
+const object = (properties: Record<string, JsonSchema>, required = Object.keys(properties)) => ({
+  type: 'object',
+  properties,
+  required,
+  additionalProperties: false,
+});
+const clipRange = (labelled: boolean) =>
+  object({ start: text, end: text, ...(labelled ? { label: text } : { speaker: text }) }, [
+    'start',
+    'end',
+  ]);
+/**
+ * Response shapes for constrained decoding (`responseJsonSchema`). Gemini then emits valid JSON,
+ * escaping quotes inside strings. Timestamps stay strings in the format the prompt asks for.
+ */
+const schemas = {
+  transcription: object({
+    text,
+    detectedLanguage: { type: ['string', 'null'] },
+    segments: {
+      type: 'array',
+      items: object({ start: text, end: text, text, speaker: text }, ['start', 'end', 'text']),
+    },
+  }),
+  understanding: object({ text, timeRanges: { type: 'array', items: clipRange(true) } }),
+  synthesis: object({
+    text,
+    timeRanges: {
+      type: 'array',
+      items: object({
+        startMs: { type: 'number' },
+        endMs: { type: 'number' },
+        label: { type: ['string', 'null'] },
+      }),
+    },
+  }),
+  translation: object({ translatedText: text }),
+} satisfies Record<string, JsonSchema>;
+const translationSchema = z.object({ translatedText: z.string() });
+function chunkSchema(request: MediaRequest): JsonSchema {
+  return request.kind === 'transcription' ? schemas.transcription : schemas.understanding;
+}
+
+/** Response text plus the diagnostics recorded with any failure it causes. */
+export interface GeminiReply {
+  text: string;
+  details: ErrorDetails;
+}
+interface GeminiResponse {
+  candidates?: Array<{
+    finishReason?: string;
+    content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+  }>;
+  promptFeedback?: { blockReason?: string };
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    thoughtsTokenCount?: number;
+  };
+}
+/** Finish reasons that mean Gemini refused the content; asking again returns the same. */
+const blockedFinishReasons = new Set([
+  'SAFETY',
+  'RECITATION',
+  'LANGUAGE',
+  'BLOCKLIST',
+  'PROHIBITED_CONTENT',
+  'SPII',
+  'IMAGE_SAFETY',
+  'IMAGE_PROHIBITED_CONTENT',
+  'IMAGE_RECITATION',
+]);
+const enumValue = (value: unknown) =>
+  typeof value === 'string' && /^[A-Z_]{1,40}$/.test(value) ? value : undefined;
+
+/**
+ * Extracts the response text, or raises a specific error for a blocked prompt, a refused or
+ * truncated candidate, or an empty answer. Records finish reason and token usage, never content.
+ */
+export function geminiReply(data: GeminiResponse, model: string): GeminiReply {
+  const usage = data.usageMetadata;
+  const finishReason = enumValue(data.candidates?.[0]?.finishReason);
+  const details: ErrorDetails = {
+    provider,
+    model,
+    ...(finishReason ? { finishReason } : {}),
+    ...(typeof usage?.promptTokenCount === 'number'
+      ? { promptTokens: usage.promptTokenCount }
+      : {}),
+    ...(typeof usage?.candidatesTokenCount === 'number'
+      ? { outputTokens: usage.candidatesTokenCount }
+      : {}),
+    ...(typeof usage?.thoughtsTokenCount === 'number'
+      ? { thoughtsTokens: usage.thoughtsTokenCount }
+      : {}),
+  };
+  const blockReason =
+    data.promptFeedback?.blockReason && enumValue(data.promptFeedback.blockReason);
+  if (data.promptFeedback?.blockReason)
+    throw new MediaError(
+      'provider_blocked',
+      `Gemini blocked the request (${blockReason ?? 'OTHER'})`,
+      false,
+      { ...details, blockReason: blockReason ?? 'OTHER' },
+    );
+  if (finishReason === 'MAX_TOKENS')
+    throw new MediaError(
+      'provider_output_truncated',
+      'Gemini reached its output token limit before finishing the answer',
+      false,
+      details,
+    );
+  if (finishReason && blockedFinishReasons.has(finishReason))
+    throw new MediaError(
+      'provider_blocked',
+      `Gemini stopped the answer (${finishReason})`,
+      false,
+      details,
+    );
+  const answer = (data.candidates?.[0]?.content?.parts ?? [])
+    .filter((part) => !part.thought)
+    .map((part) => part.text ?? '')
+    .join('');
+  if (!answer.trim()) throw invalidOutput(provider, 'empty response', details);
+  return { text: answer, details };
+}
+
 async function generateGemini(
   model: string,
   apiKey: string,
   parts: unknown[],
   signal: AbortSignal,
-): Promise<string> {
+  responseJsonSchema: JsonSchema,
+): Promise<GeminiReply> {
   const response = await checked(
     `${geminiRoot}/v1beta/models/${encodeURIComponent(model)}:generateContent`,
     {
@@ -335,14 +542,10 @@ async function generateGemini(
       },
       body: JSON.stringify({
         contents: [{ role: 'user', parts }],
-        generationConfig: { responseMimeType: 'application/json' },
+        generationConfig: { responseMimeType: 'application/json', responseJsonSchema },
       }),
     },
+    provider,
   );
-  const data = (await response.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  };
-  const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('');
-  if (!text) throw new Error('Gemini returned no text');
-  return text;
+  return geminiReply((await readJson(response, provider, signal)) as GeminiResponse, model);
 }

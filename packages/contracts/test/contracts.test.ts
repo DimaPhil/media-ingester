@@ -6,6 +6,8 @@ import {
   contractDocument,
   requestSchema,
   resultSchema,
+  jobSchema,
+  operationNameSchema,
 } from '../src/index.js';
 describe('wire contract', () => {
   it('exposes subscription understanding while attributing standalone ASR only to Codex', () => {
@@ -70,5 +72,41 @@ describe('wire contract', () => {
     ).toBe(true);
     expect(requestSchema.safeParse({ ...request, unknown: true }).success).toBe(false);
     expect(resultSchema.safeParse({ kind: 'transcription' }).success).toBe(false);
+  });
+  it('names next-step operations from the catalog and keeps job additions optional', () => {
+    expect(operationNameSchema.options).toEqual(operationIds);
+    const legacy = {
+      id: '00000000-0000-4000-8000-000000000000',
+      status: 'failed',
+      request: { kind: 'transcription', provider: 'openai', source: { kind: 'upload', uri: 'a' } },
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      completedChunks: 1,
+      totalChunks: 2,
+      attempt: 1,
+      result: null,
+      error: { code: 'processing_failed', message: 'failed', retryable: true },
+    };
+    expect(jobSchema.safeParse(legacy).success).toBe(true);
+    const current = {
+      ...legacy,
+      stage: 'failed',
+      error: {
+        ...legacy.error,
+        details: { provider: 'openai', chunkIndex: 1, retryAfter: null, blocked: false },
+        nextSteps: [{ operation: 'retry', input: { id: legacy.id }, reason: 'Transient' }],
+      },
+    };
+    expect(jobSchema.parse(current)).toEqual(current);
+    expect(
+      jobSchema.safeParse({ ...current, error: { ...current.error, details: { nested: {} } } })
+        .success,
+    ).toBe(false);
+    expect(
+      jobSchema.safeParse({
+        ...current,
+        nextSteps: [{ operation: 'delete', input: {}, reason: 'x' }],
+      }).success,
+    ).toBe(false);
   });
 });

@@ -66,6 +66,7 @@ function validated(output: SynthesisOutput, startMs: number, endMs: number): Syn
     throw new MediaError(
       'invalid_provider_output',
       'Synthesis returned empty text or timestamps outside its span',
+      true,
     );
   return {
     text: output.text.trim(),

@@ -95,9 +95,64 @@ export const resultSchema = z.object({
 });
 export type MediaResult = z.infer<typeof resultSchema>;
 export const statusSchema = z.enum(['queued', 'running', 'completed', 'failed']);
+/** Where a job is in its lifecycle. Running stages change only at transitions, never per chunk. */
+export const stageSchema = z.enum([
+  'queued',
+  'resolving',
+  'downloading',
+  'inspecting',
+  'planning',
+  'processing',
+  'synthesizing',
+  'translating',
+  'completed',
+  'failed',
+]);
+export type JobStage = z.infer<typeof stageSchema>;
+/** Catalog operation names; a contract test keeps this list equal to the operation catalog. */
+export const operationNameSchema = z.enum([
+  'submit',
+  'get',
+  'list',
+  'retry',
+  'history',
+  'result',
+  'resolve',
+  'upload',
+  'download',
+  'info',
+]);
+/**
+ * A suggested follow-up call: a catalog operation and its complete input. REST and MCP return it
+ * as data; the CLI renders it as a `media` command.
+ */
+export const nextStepSchema = z.object({
+  operation: operationNameSchema,
+  input: z.record(z.string(), z.unknown()),
+  reason: z.string().max(300),
+  /** Seconds to wait before calling, for polling a job that is still active. */
+  pollAfterSeconds: z.number().int().positive().optional(),
+});
+export type NextStep = z.infer<typeof nextStepSchema>;
+/** Flat diagnostic context: provider, model, chunk range, attempt, finish reason, HTTP status. */
+export const errorDetailsSchema = z.record(
+  z.string().max(64),
+  z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
+);
+export type ErrorDetails = z.infer<typeof errorDetailsSchema>;
+export const jobErrorSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  retryable: z.boolean(),
+  details: errorDetailsSchema.optional(),
+  nextSteps: z.array(nextStepSchema).optional(),
+});
+export type JobError = z.infer<typeof jobErrorSchema>;
 export const jobSchema = z.object({
   id: z.uuid(),
   status: statusSchema,
+  /** Absent only in records written before 1.6.0. */
+  stage: stageSchema.optional(),
   request: requestSchema,
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
@@ -105,9 +160,11 @@ export const jobSchema = z.object({
   totalChunks: z.number().int().nonnegative(),
   attempt: z.number().int().nonnegative(),
   result: resultSchema.nullable(),
-  error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }).nullable(),
+  error: jobErrorSchema.nullable(),
   /** Retained result ID reused instead of processing; absent when this job produced its result. */
   cachedFrom: z.uuid().optional(),
+  /** Follow-up calls while the job is queued or running; failed jobs carry `error.nextSteps`. */
+  nextSteps: z.array(nextStepSchema).optional(),
 });
 export type JobView = z.infer<typeof jobSchema>;
 export const resolvedSourceSchema = z.object({

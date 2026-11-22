@@ -9,13 +9,19 @@ import {
   type MediaRequest,
   type Source,
 } from '@media-ingest/contracts';
+import { UsageError } from './output.js';
 
-export async function uploadFile(client: MediaClient, path: string) {
+export async function uploadFile(
+  client: MediaClient,
+  path: string,
+  diagnostic?: (message: string) => void,
+) {
   const info = await stat(path);
   if (!info.isFile() || info.size > MAX_INLINE_MEDIA_BYTES)
-    throw new Error('Upload must be a regular file no larger than 32 MiB');
+    throw new UsageError('Upload must be a regular file no larger than 32 MiB');
   const bytes = await readFile(path);
-  if (bytes.length > MAX_INLINE_MEDIA_BYTES) throw new Error('Upload exceeds 32 MiB');
+  if (bytes.length > MAX_INLINE_MEDIA_BYTES) throw new UsageError('Upload exceeds 32 MiB');
+  diagnostic?.(`Uploading ${basename(path)} (${(bytes.length / 1024 / 1024).toFixed(1)} MiB)`);
   return client.call('upload', { fileName: basename(path), data: bytes.toString('base64') });
 }
 export function inferSource(uri: string, kind?: string): Source {
@@ -35,6 +41,7 @@ export function registerMediaCommands(
   program: Command,
   client: () => Promise<MediaClient>,
   print: (value: unknown) => void,
+  diagnostic?: (message: string) => void,
 ) {
   for (const [name, kind] of [
     ['transcribe', 'transcription'],
@@ -83,7 +90,7 @@ export function registerMediaCommands(
             ...(options.force ? { force: true } : {}),
           });
           if (source.kind === 'local_file')
-            request.source = (await uploadFile(api, source.uri)).source;
+            request.source = (await uploadFile(api, source.uri, diagnostic)).source;
           print(
             await api.call(
               'submit',

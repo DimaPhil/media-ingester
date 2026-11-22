@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Sql, TransactionSql } from 'postgres';
 import type {
-  JobView,
+  JobError,
   MediaResult,
   ProcessedMedia,
   ProcessedMediaSummary,
@@ -19,6 +19,7 @@ import type {
   Lease,
   ListJobs,
   ResultLookup,
+  RunningStage,
 } from '@media-ingest/sdk';
 import type { PostgresUploadRetention } from './upload-retention.js';
 
@@ -124,6 +125,7 @@ export class PostgresJobRepository implements JobRepository {
       const token = randomUUID();
       Object.assign(job, {
         status: 'running',
+        stage: 'resolving',
         leaseToken: token,
         leaseExpiresAt: now + leaseMs,
         updatedAt: new Date(now).toISOString(),
@@ -191,6 +193,7 @@ export class PostgresJobRepository implements JobRepository {
       if (!row) throw new MediaError('not_found', 'Cached result not found');
       Object.assign(job, {
         status: 'completed',
+        stage: 'completed',
         result: row.result,
         cachedFrom: cached.id,
         error: null,
@@ -226,6 +229,12 @@ export class PostgresJobRepository implements JobRepository {
     });
   }
 
+  async saveStage(id: string, token: string, stage: RunningStage, _now: number): Promise<void> {
+    await this.fenced(id, token, (job) => {
+      job.stage = stage;
+    });
+  }
+
   async savePlan(
     id: string,
     token: string,
@@ -243,6 +252,7 @@ export class PostgresJobRepository implements JobRepository {
       job.plan = plan;
       job.sourceFingerprint = sourceFingerprint;
       job.totalChunks = plan.length;
+      job.stage = 'processing';
     });
   }
 
@@ -278,6 +288,7 @@ export class PostgresJobRepository implements JobRepository {
           ${transaction.json(JSON.parse(JSON.stringify(record)))})`;
       Object.assign(job, {
         status: 'completed',
+        stage: 'completed',
         result,
         error: null,
         leaseToken: null,
@@ -288,14 +299,15 @@ export class PostgresJobRepository implements JobRepository {
     });
   }
 
-  async fail(
-    id: string,
-    token: string,
-    error: NonNullable<JobView['error']>,
-    _now: number,
-  ): Promise<void> {
+  async fail(id: string, token: string, error: JobError, _now: number): Promise<void> {
     await this.fenced(id, token, (job) => {
-      Object.assign(job, { status: 'failed', error, leaseToken: null, leaseExpiresAt: null });
+      Object.assign(job, {
+        status: 'failed',
+        stage: 'failed',
+        error,
+        leaseToken: null,
+        leaseExpiresAt: null,
+      });
     });
   }
 
@@ -311,6 +323,7 @@ export class PostgresJobRepository implements JobRepository {
         throw new MediaError('conflict', 'Only failed jobs can be retried');
       Object.assign(job, {
         status: 'queued',
+        stage: 'queued',
         error: null,
         result: null,
         leaseToken: null,

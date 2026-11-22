@@ -1,8 +1,13 @@
 import { readFile, stat } from 'node:fs/promises';
 import type { MediaRequest } from '@media-ingest/contracts';
-import type { AdapterContext, Artifact, ChunkOutput } from '@media-ingest/sdk';
+import {
+  MediaError,
+  type AdapterContext,
+  type Artifact,
+  type ChunkOutput,
+} from '@media-ingest/sdk';
 import { z } from 'zod';
-import { checked, key, parseTranslation } from './shared.js';
+import { checked, conform, key, parseTranslation, readJson } from './shared.js';
 import { ApiProvider } from './api-provider.js';
 
 interface OpenAiOptions {
@@ -67,12 +72,14 @@ export class OpenAiProvider extends ApiProvider {
     request: MediaRequest,
     context: AdapterContext,
   ): Promise<ChunkOutput> {
-    if (request.kind !== 'transcription') throw new Error('Understanding requires Gemini');
+    if (request.kind !== 'transcription')
+      throw new MediaError('invalid_request', 'Understanding requires Gemini');
     const model = this.resolveModel(request);
-    const signal = this.signal(context);
-    const apiKey = this.options.apiKey;
+    const apiKey = key(this.options.apiKey, 'OPENAI_API_KEY');
     if ((await stat(artifact.uri)).size > 24 * 1024 * 1024)
-      throw new Error('OpenAI chunk exceeds 24 MiB');
+      throw new MediaError('media_too_large', 'OpenAI chunk exceeds 24 MiB', false, {
+        provider: 'openai',
+      });
     const form = new FormData();
     form.set(
       'file',
@@ -90,13 +97,14 @@ export class OpenAiProvider extends ApiProvider {
     );
     if (model.includes('diarize')) form.set('chunking_strategy', 'auto');
     if (request.inputLanguage) form.set('language', request.inputLanguage);
-    const response = await checked('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key(apiKey, 'OPENAI_API_KEY')}` },
-      body: form,
-      signal,
+    return this.withDeadline(context, async (signal) => {
+      const response = await checked(
+        'https://api.openai.com/v1/audio/transcriptions',
+        { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal },
+        'openai',
+      );
+      return conform(await readJson(response, 'openai', signal), parseOpenAi, 'openai', { model });
     });
-    return parseOpenAi(await response.json());
   }
 }
 async function translateOpenAi(
@@ -105,19 +113,37 @@ async function translateOpenAi(
   apiKey: string | undefined,
   signal: AbortSignal,
 ): Promise<string> {
-  const response = await checked('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    signal,
-    headers: {
-      Authorization: `Bearer ${key(apiKey, 'Translation provider')}`,
-      'content-type': 'application/json',
+  const token = key(apiKey, 'Translation provider');
+  const response = await checked(
+    'https://api.openai.com/v1/chat/completions',
+    {
+      method: 'POST',
+      signal,
+      headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        response_format: { type: 'json_object' },
+        messages: [{ role: 'user', content: prompt }],
+      }),
     },
-    body: JSON.stringify({
-      model,
-      response_format: { type: 'json_object' },
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  });
-  const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  return parseTranslation(data.choices?.[0]?.message?.content ?? '');
+    'openai',
+  );
+  const data = (await readJson(response, 'openai', signal)) as {
+    choices?: Array<{ finish_reason?: string; message?: { content?: string } }>;
+  };
+  const choice = data.choices?.[0];
+  const details = { provider: 'openai', model };
+  if (choice?.finish_reason === 'length')
+    throw new MediaError(
+      'provider_output_truncated',
+      'OpenAI reached its output token limit before finishing the translation',
+      false,
+      { ...details, finishReason: 'length' },
+    );
+  if (choice?.finish_reason === 'content_filter')
+    throw new MediaError('provider_blocked', 'OpenAI filtered the translation', false, {
+      ...details,
+      finishReason: 'content_filter',
+    });
+  return parseTranslation(choice?.message?.content ?? '', 'openai');
 }

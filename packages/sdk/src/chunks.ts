@@ -234,17 +234,26 @@ export function aggregate(
 
 export function validateChunk(output: ChunkOutput, request: MediaRequest, chunk: Chunk) {
   // Validate provider output through the public result schema before checkpointing.
-  const validated = resultSchema.parse({
+  const parsed = resultSchema.safeParse({
     ...output,
     kind: request.kind,
     provider: request.provider,
     model: request.model,
   });
+  if (!parsed.success)
+    throw new MediaError(
+      'invalid_provider_output',
+      'Provider output does not match the result schema',
+      true,
+    );
+  const validated = parsed.data;
   for (const range of [...validated.segments, ...validated.timeRanges]) {
     if (range.endMs < range.startMs || range.endMs > chunk.endMs - chunk.startMs)
       throw new MediaError(
         'invalid_provider_output',
         'Provider timestamps must fall within the chunk',
+        true,
+        { outputStartMs: range.startMs, outputEndMs: range.endMs },
       );
   }
   return validated;

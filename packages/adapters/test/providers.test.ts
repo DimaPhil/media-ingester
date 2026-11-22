@@ -12,6 +12,7 @@ import {
 } from '../src/providers.js';
 import { toClipTime } from '../src/providers/gemini.js';
 import type { MediaRequest } from '@media-ingest/contracts';
+import { MediaError } from '@media-ingest/sdk';
 
 vi.mock('google-auth-library', () => ({
   GoogleAuth: class {
@@ -611,5 +612,268 @@ describe('provider normalization', () => {
       ),
     ).toBe('bonjour');
     expect(await new NodeProviders().translate('hello', request, context)).toBe('hello');
+  });
+});
+
+/** Shape of a recorded generateContent response; only the text and counts vary. */
+function geminiResponse(
+  text: string | undefined,
+  finishReason = 'STOP',
+  extra: Record<string, unknown> = {},
+) {
+  return Response.json({
+    candidates: [
+      {
+        ...(text === undefined ? {} : { content: { parts: [{ text }], role: 'model' } }),
+        finishReason,
+        index: 0,
+      },
+    ],
+    usageMetadata: {
+      promptTokenCount: 52_341,
+      candidatesTokenCount: 5_012,
+      totalTokenCount: 58_901,
+      thoughtsTokenCount: 1_548,
+    },
+    modelVersion: 'gemini-2.5-flash',
+    responseId: 'recorded',
+    ...extra,
+  });
+}
+// Direct speech inside a string value, left unescaped: the failure seen on a 3 h Russian video.
+const unescapedQuotes =
+  '{"text": "Клиент говорит: "У меня не проходит оплата." Э, мы проверили.", "detectedLanguage": "ru", "segments": [{"start": "00:01", "end": "00:04", "text": "Клиент говорит: "У меня не проходит оплата.""}]}';
+const validTranscript = JSON.stringify({
+  text: 'Клиент говорит: "У меня не проходит оплата."',
+  detectedLanguage: 'ru',
+  segments: [
+    { start: '00:01', end: '00:04', text: 'Клиент говорит: "У меня не проходит оплата."' },
+  ],
+});
+
+describe('Gemini structured output and failures', () => {
+  const gemini = { ...request, provider: 'google-gemini' as const };
+  const media = { uri: 'https://www.youtube.com/watch?v=abcdefghijk', durationMs: 10_000 };
+  const chunk = { index: 3, startMs: 0, endMs: 10_000 };
+  const run = (providers = new NodeProviders({ geminiApiKey: 'key' })) =>
+    providers.processRemote(media, chunk, gemini, context);
+
+  it('requests a response schema and asks again after unescaped quotes break the JSON', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(geminiResponse(unescapedQuotes))
+      .mockResolvedValueOnce(geminiResponse(validTranscript));
+    vi.stubGlobal('fetch', fetcher);
+    const output = await run();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(output.text).toBe('Клиент говорит: "У меня не проходит оплата."');
+    expect(output.segments).toEqual([
+      { startMs: 1000, endMs: 4000, text: 'Клиент говорит: "У меня не проходит оплата."' },
+    ]);
+    const { generationConfig } = JSON.parse(fetcher.mock.calls[0]![1].body);
+    expect(generationConfig.responseMimeType).toBe('application/json');
+    expect(generationConfig.responseJsonSchema).toMatchObject({
+      type: 'object',
+      required: ['text', 'detectedLanguage', 'segments'],
+      properties: {
+        detectedLanguage: { type: ['string', 'null'] },
+        segments: {
+          type: 'array',
+          items: { required: ['start', 'end', 'text'], properties: { start: { type: 'string' } } },
+        },
+      },
+    });
+  });
+
+  it('fails with provider_invalid_output and parse context after three unusable answers', async () => {
+    const fetcher = vi.fn().mockImplementation(async () => geminiResponse(unescapedQuotes));
+    vi.stubGlobal('fetch', fetcher);
+    const error = await run().catch((caught: unknown) => caught);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(error).toBeInstanceOf(MediaError);
+    expect(error).toMatchObject({
+      code: 'provider_invalid_output',
+      retryable: true,
+      details: {
+        provider: 'google-gemini',
+        model: 'gemini-2.5-flash',
+        finishReason: 'STOP',
+        promptTokens: 52_341,
+        outputTokens: 5_012,
+        thoughtsTokens: 1_548,
+        calls: 3,
+        errorName: 'SyntaxError',
+        parseErrorPosition: expect.any(Number),
+        outputChars: unescapedQuotes.length,
+      },
+    });
+    // Details describe the failure without repeating any model output.
+    expect(JSON.stringify((error as MediaError).details)).not.toContain('оплата');
+    expect((error as MediaError).message).not.toContain('оплата');
+  });
+
+  it('asks again for empty or schema-invalid answers within the same budget', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(geminiResponse(''))
+      .mockResolvedValueOnce(geminiResponse('{"segments":[]}'))
+      .mockResolvedValueOnce(geminiResponse(validTranscript));
+    vi.stubGlobal('fetch', fetcher);
+    expect((await run()).detectedLanguage).toBe('ru');
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    const missing = vi.fn().mockImplementation(async () => geminiResponse('{"segments":[]}'));
+    vi.stubGlobal('fetch', missing);
+    await expect(run()).rejects.toMatchObject({
+      code: 'provider_invalid_output',
+      details: { schemaPath: 'text', calls: 3 },
+    });
+  });
+
+  it('reports truncation and refusals once, without asking again', async () => {
+    const truncated = vi
+      .fn()
+      .mockImplementation(async () => geminiResponse('{"text":"partial', 'MAX_TOKENS'));
+    vi.stubGlobal('fetch', truncated);
+    await expect(run()).rejects.toMatchObject({
+      code: 'provider_output_truncated',
+      retryable: false,
+      details: { finishReason: 'MAX_TOKENS', outputTokens: 5_012 },
+    });
+    expect(truncated).toHaveBeenCalledTimes(1);
+    for (const finishReason of ['SAFETY', 'RECITATION', 'PROHIBITED_CONTENT', 'SPII']) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(geminiResponse(undefined, finishReason)));
+      await expect(run()).rejects.toMatchObject({
+        code: 'provider_blocked',
+        retryable: false,
+        details: { finishReason },
+      });
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          Response.json({ promptFeedback: { blockReason: 'PROHIBITED_CONTENT' } }),
+        ),
+    );
+    await expect(run()).rejects.toMatchObject({
+      code: 'provider_blocked',
+      details: { blockReason: 'PROHIBITED_CONTENT' },
+    });
+  });
+
+  it('classifies HTTP status, network failure, deadline and missing configuration', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('quota body', { status: 429 })));
+    const limited = await run().catch((caught: unknown) => caught);
+    expect(limited).toMatchObject({
+      code: 'provider_http_error',
+      retryable: true,
+      details: { provider: 'google-gemini', httpStatus: 429 },
+    });
+    expect((limited as MediaError).message).not.toContain('quota body');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 400 })));
+    await expect(run()).rejects.toMatchObject({ code: 'provider_http_error', retryable: false });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+    await expect(run()).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: true,
+      details: { errorName: 'TypeError' },
+    });
+    const hanging = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) =>
+          init.signal!.addEventListener('abort', () => reject(init.signal!.reason), {
+            once: true,
+          }),
+        ),
+    );
+    vi.stubGlobal('fetch', hanging);
+    await expect(
+      run(new NodeProviders({ geminiApiKey: 'key', timeoutMs: 20 })),
+    ).rejects.toMatchObject({
+      code: 'provider_timeout',
+      retryable: true,
+      details: { provider: 'google-gemini', timeoutMs: 20 },
+    });
+    // Cancellation by the worker is not a provider timeout.
+    const shutdown = new AbortController();
+    const cancelled = new NodeProviders({ geminiApiKey: 'key' }).processRemote(
+      media,
+      chunk,
+      gemini,
+      {
+        ...context,
+        signal: shutdown.signal,
+      },
+    );
+    shutdown.abort(new Error('shutdown'));
+    await expect(cancelled).rejects.toThrow('shutdown');
+    await expect(run(new NodeProviders())).rejects.toMatchObject({
+      code: 'provider_not_configured',
+      retryable: false,
+    });
+  });
+
+  it('constrains synthesis and translation output and retries their parse failures', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(geminiResponse('{"text": "broken "quote"", "timeRanges": []}'))
+      .mockResolvedValueOnce(geminiResponse('{"text":"Whole","timeRanges":[]}'))
+      .mockResolvedValueOnce(geminiResponse('{"translatedText": "сломано "тут""}'))
+      .mockResolvedValueOnce(geminiResponse('{"translatedText":"готово"}'));
+    vi.stubGlobal('fetch', fetcher);
+    const providers = new NodeProviders({ geminiApiKey: 'key' });
+    const understanding = { ...gemini, kind: 'understanding' as const, prompt: 'Summarize' };
+    const input = { durationMs: 1000, startMs: 0, endMs: 1000, final: true, parts: [] };
+    expect(await providers.synthesize(input, understanding, context)).toEqual({
+      text: 'Whole',
+      timeRanges: [],
+    });
+    expect(await providers.translate('done', { ...gemini, targetLanguage: 'ru' }, context)).toBe(
+      'готово',
+    );
+    const schemas = fetcher.mock.calls.map(
+      (call) => JSON.parse(call[1].body).generationConfig.responseJsonSchema,
+    );
+    expect(schemas[0].properties.timeRanges.items.required).toEqual(['startMs', 'endMs', 'label']);
+    expect(schemas[2]).toMatchObject({ required: ['translatedText'] });
+  });
+
+  it('maps OpenAI translation truncation, filtering and broken JSON to specific codes', async () => {
+    const providers = new NodeProviders({ openaiApiKey: 'key' });
+    const french = { ...request, targetLanguage: 'fr' };
+    const reply = (content: string, finish_reason = 'stop') =>
+      Response.json({ choices: [{ finish_reason, message: { content } }] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply('{"translatedText":"bon', 'length')));
+    await expect(providers.translate('hi', french, context)).rejects.toMatchObject({
+      code: 'provider_output_truncated',
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply('', 'content_filter')));
+    await expect(providers.translate('hi', french, context)).rejects.toMatchObject({
+      code: 'provider_blocked',
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply('{"translatedText": "a "b""}')));
+    await expect(providers.translate('hi', french, context)).rejects.toMatchObject({
+      code: 'provider_invalid_output',
+      details: { provider: 'openai', errorName: 'SyntaxError' },
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ wrong: true })));
+    await expect(providers.process(await artifact(), request, context)).rejects.toMatchObject({
+      code: 'provider_invalid_output',
+      details: { provider: 'openai', schemaPath: 'text' },
+    });
+  });
+
+  it('offers only configured paid providers that support the request, never for subscriptions', () => {
+    const providers = new NodeProviders({ openaiApiKey: 'a', geminiApiKey: 'b' });
+    expect(providers.alternatives(gemini)).toEqual(['openai']);
+    expect(providers.alternatives(request)).toEqual(['google-gemini']);
+    expect(
+      providers.alternatives({ ...gemini, kind: 'understanding', prompt: 'Summarize' }),
+    ).toEqual([]);
+    expect(providers.alternatives({ ...request, provider: 'codex' })).toEqual([]);
+    expect(
+      new NodeProviders({ geminiApiKey: 'b', googleProject: 'p' }).alternatives(gemini),
+    ).toEqual(['google-speech']);
   });
 });

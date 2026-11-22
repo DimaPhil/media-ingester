@@ -8,7 +8,9 @@ import type {
   ProcessedMediaDetails,
   ListHistory,
   HistoryPage,
+  JobError,
 } from '@media-ingest/contracts';
+import type { RunningStage } from './job-view.js';
 
 /**
  * `startMs`/`endMs` is the extracted media range. When a boundary has no pause, neighboring
@@ -62,6 +64,13 @@ export interface JobRepository {
   getResult?(ownerId: string, id: string): Promise<ProcessedMedia | null>;
   claim(now: number, leaseMs: number): Promise<Lease | null>;
   heartbeat(id: string, token: string, now: number, leaseMs: number): Promise<void>;
+  /**
+   * Fenced write of the running stage. Workers call it only at stage transitions. Claiming sets
+   * `resolving` and saving a plan sets `processing` without a separate write. Optional: without
+   * it, views derive the stage from status and chunk counts.
+   */
+  saveStage?(id: string, token: string, stage: RunningStage, now: number): Promise<void>;
+  /** Saving a plan also moves the job to the `processing` stage. */
   savePlan(
     id: string,
     token: string,
@@ -87,7 +96,7 @@ export interface JobRepository {
   findResults?(ownerId: string, lookup: ResultLookup, limit: number): Promise<ProcessedMedia[]>;
   /** Fenced completion with a retained result. Adds no history record. */
   completeFromCache?(id: string, token: string, cached: ProcessedMedia, now: number): Promise<void>;
-  fail(id: string, token: string, error: NonNullable<JobView['error']>, now: number): Promise<void>;
+  fail(id: string, token: string, error: JobError, now: number): Promise<void>;
   retry(ownerId: string, id: string, now: number): Promise<JobRecord>;
 }
 export interface AdapterContext {
@@ -168,6 +177,11 @@ export interface ProviderAdapter {
     context: AdapterContext,
   ): Promise<SynthesisOutput | null>;
   translate?(text: string, request: MediaRequest, context: AdapterContext): Promise<string>;
+  /**
+   * Configured providers that can serve this request instead, suggested to callers when a
+   * failure is provider-specific. Never executed automatically.
+   */
+  alternatives?(request: MediaRequest): MediaRequest['provider'][];
 }
 export interface RemoteMedia {
   /** Canonical address the provider fetches. */
@@ -205,5 +219,6 @@ export interface SdkOptions {
   maxChunks?: number;
   clock?: () => number;
   onCleanupError?: (error: unknown) => void;
-  onProcessingError?: (jobId: string, error: unknown) => void;
+  /** Receives the raw error and the recorded public failure, including worker context. */
+  onProcessingError?: (jobId: string, error: unknown, failure: JobError) => void;
 }

@@ -44,11 +44,27 @@ const httpErrorMessages: Partial<Record<number, string>> = {
   409: 'Conflict; inspect the job or idempotency key.',
 };
 
+/** The service's machine-readable error code, if the body carries one; nothing else is read. */
+async function serverErrorCode(response: Response): Promise<string | undefined> {
+  try {
+    const body = (await response.json()) as { error?: { code?: unknown } } | null;
+    const code = body?.error?.code;
+    return typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(code) ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function readResponse<K extends OperationId>(id: K, response: Response): Promise<Output<K>> {
   if (!response.ok) {
-    // Never reflect arbitrary server response bodies: they may contain credentials or upstream payloads.
-    const hint = httpErrorMessages[response.status] ?? `API returned HTTP ${response.status}.`;
-    throw new MediaClientError(hint, response.status, 'http_error');
+    // Never reflect arbitrary server response bodies: they may contain credentials or upstream
+    // payloads. Only a strictly shaped error code is kept; the message is chosen locally.
+    const code = await serverErrorCode(response);
+    const hint =
+      code === 'invalid_input'
+        ? `The server rejected the ${id} input; check it with media schema ${id}.`
+        : (httpErrorMessages[response.status] ?? `API returned HTTP ${response.status}.`);
+    throw new MediaClientError(hint, response.status, code ?? 'http_error');
   }
   let value: unknown;
   try {

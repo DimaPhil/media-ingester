@@ -1,8 +1,12 @@
+import type { ErrorDetails } from '@media-ingest/contracts';
+
 export class MediaError extends Error {
   constructor(
     public readonly code: string,
     message: string,
     public readonly retryable = false,
+    /** Flat, public diagnostic context. Never put provider bodies, tokens or private URLs here. */
+    public readonly details?: ErrorDetails,
   ) {
     super(message);
     this.name = 'MediaError';

@@ -246,10 +246,39 @@ describe('real HTTP, CLI and durable worker', () => {
         'retry-fixture',
       ]),
     );
+    expect(queued.stage).toBe('queued');
+    expect(queued.nextSteps?.[0]).toMatchObject({ operation: 'get', pollAfterSeconds: 5 });
     await sdk.runNext();
-    const failed = jobSchema.parse(await cliJson(['get', queued.id]));
+    const failedOutput = (await cliJson(['get', queued.id])) as { help?: string[] };
+    const failed = jobSchema.parse(failedOutput);
     expect(failed.status).toBe('failed');
+    expect(failed.stage).toBe('failed');
     expect(failed.completedChunks).toBe(1);
+    expect(failed.error).toMatchObject({
+      code: 'processing_failed',
+      retryable: true,
+      details: {
+        errorName: 'Error',
+        stage: 'processing',
+        attempt: 1,
+        provider: 'openai',
+        model: 'deterministic-test-model',
+        chunkIndex: 1,
+        chunkStartMs: 1000,
+        chunkEndMs: 2000,
+      },
+    });
+    expect(failedOutput.help).toEqual([
+      `media retry ${queued.id}  # Failure may be transient; retry reuses 1 completed chunks`,
+    ]);
+    // MCP returns the same structured suggestions as data.
+    const overMcp = await rpc('tools/call', {
+      name: 'media_get',
+      arguments: { id: queued.id },
+    });
+    expect((await overMcp.json()).result.structuredContent.error.nextSteps).toEqual(
+      failed.error?.nextSteps,
+    );
     expect(processed).toEqual([0, 1]);
     const retried = jobSchema.parse(await cliJson(['retry', queued.id]));
     expect(retried.status).toBe('queued');
