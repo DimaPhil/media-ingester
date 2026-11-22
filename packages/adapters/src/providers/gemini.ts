@@ -60,7 +60,11 @@ export class GeminiProvider extends ApiProvider {
     return async (prompt: string, signal: AbortSignal) => {
       const apiKey = key(options.apiKey, 'GEMINI_API_KEY');
       const output = await generateJson(
-        () => generateGemini(model, apiKey, [{ text: prompt }], signal, schemas.translation),
+        () =>
+          generateGemini(model, apiKey, [{ text: prompt }], signal, {
+            schema: schemas.translation,
+            maxOutputTokens: translationOutputTokens(prompt),
+          }),
         (value, details) => ({
           value: conform(value, (raw) => translationSchema.parse(raw), provider, details),
           retry: false,
@@ -140,7 +144,7 @@ export class GeminiProvider extends ApiProvider {
             },
           ],
           signal,
-          chunkSchema(request),
+          chunkOutput(request, chunk.endMs - chunk.startMs),
         ),
       ),
     );
@@ -162,7 +166,8 @@ export class GeminiProvider extends ApiProvider {
             apiKey,
             [{ text: synthesisPrompt(input, request) }],
             signal,
-            schemas.synthesis,
+            // The whole-media answer has no size bound to derive; the model's own limit applies.
+            { schema: schemas.synthesis },
           ),
         (value, details) => ({
           value: conform(value, parseSynthesis, provider, details),
@@ -264,7 +269,7 @@ export class GeminiProvider extends ApiProvider {
             { file_data: { mime_type: mimeType, file_uri: fileUri } },
           ],
           signal,
-          chunkSchema(request),
+          chunkOutput(request, artifact.durationMs),
         ),
       );
     } finally {
@@ -290,22 +295,35 @@ interface Clip {
 
 /**
  * Gemini's timestamps are approximate, and some calls still drift outside the clip. Such output is
- * requested again within the shared call budget; the worker rejects whatever remains.
+ * requested again within the shared call budget; the worker rejects whatever remains. A truncated
+ * chunk answer is usually a repetition loop that does not recur, so it is requested again too.
  */
 function withinClip(clip: Clip, generate: () => Promise<GeminiReply>): Promise<ChunkOutput> {
-  return generateJson(generate, (value, details) => {
-    const output = toClipTime(value, clip);
-    return { value: conform(output.value, parseChunk, provider, details), retry: !output.inside };
-  });
+  return generateJson(
+    generate,
+    (value, details) => {
+      const output = toClipTime(value, clip);
+      return { value: conform(output.value, parseChunk, provider, details), retry: !output.inside };
+    },
+    chunkRetries,
+  );
 }
 
+const outputRetries: ReadonlySet<string> = new Set(['provider_invalid_output']);
+const chunkRetries: ReadonlySet<string> = new Set([
+  'provider_invalid_output',
+  'provider_output_truncated',
+]);
+
 /**
- * Requests JSON until `accept` takes it, at most three calls. Unusable output (invalid JSON or
- * missing fields) is asked for again; blocked, truncated and HTTP failures are not.
+ * Requests JSON until `accept` takes it, at most three calls. Failures with a code in `retryOn`
+ * (by default unusable output: invalid JSON, missing fields, empty text) are asked for again and
+ * the last one is raised with the number of calls; blocked and HTTP failures are not.
  */
 export async function generateJson<T>(
   generate: () => Promise<GeminiReply>,
   accept: (value: unknown, details: ErrorDetails) => { value: T; retry: boolean },
+  retryOn = outputRetries,
 ): Promise<T> {
   for (let call = 1; ; call += 1) {
     let accepted: { value: T; retry: boolean };
@@ -314,7 +332,7 @@ export async function generateJson<T>(
       const details = { ...reply.details, calls: call };
       accepted = accept(decodeModelJson(reply.text, provider, details), details);
     } catch (error) {
-      if (!(error instanceof MediaError) || error.code !== 'provider_invalid_output') throw error;
+      if (!(error instanceof MediaError) || !retryOn.has(error.code)) throw error;
       if (call < generationAttempts) continue;
       throw new MediaError(error.code, error.message, error.retryable, {
         ...error.details,
@@ -436,8 +454,51 @@ const schemas = {
   translation: object({ translatedText: text }),
 } satisfies Record<string, JsonSchema>;
 const translationSchema = z.object({ translatedText: z.string() });
-function chunkSchema(request: MediaRequest): JsonSchema {
-  return request.kind === 'transcription' ? schemas.transcription : schemas.understanding;
+/**
+ * Output caps so a degenerate repetition loop fails in seconds instead of running to the model's
+ * 65,536-token limit. In the live 3 h Russian transcription, 10-minute chunks needed 5,000–7,000
+ * output tokens (at most about 12 per second of media), while one looping chunk ran to 65,352.
+ * 36 tokens per second is three times that peak; verbatim speech is the densest regular output,
+ * so understanding answers use the same rate. Gemini 2.5 counts thinking tokens against
+ * `maxOutputTokens`, so each cap adds a thinking allowance, larger for understanding, whose
+ * default model is 2.5 Pro. That allowance is also the floor for very short chunks. The ceiling
+ * is the 65,536-token output limit of Gemini 2.5 Flash and Pro. A 10-minute chunk gets 29,792
+ * tokens for transcription and 37,984 for understanding.
+ */
+const chunkOutputTokensPerSecond = 36;
+const thinkingAllowance = { transcription: 8_192, understanding: 16_384 } as const;
+const outputTokenLimit = 65_536;
+/** The provider's chunk length, assumed when a chunk's duration is unknown. */
+const defaultChunkMs = 10 * 60_000;
+
+export function chunkOutputTokens(request: MediaRequest, durationMs: number | undefined): number {
+  const seconds = (durationMs && durationMs > 0 ? durationMs : defaultChunkMs) / 1000;
+  return Math.min(
+    outputTokenLimit,
+    thinkingAllowance[request.kind] + Math.ceil(seconds * chunkOutputTokensPerSecond),
+  );
+}
+
+/**
+ * Translation output is about as long as its input. Latin and Cyrillic text average three to four
+ * characters per token, so one token per two prompt characters leaves 1.5–2× headroom; the
+ * transcription thinking allowance comes on top.
+ */
+export function translationOutputTokens(prompt: string): number {
+  return Math.min(outputTokenLimit, thinkingAllowance.transcription + Math.ceil(prompt.length / 2));
+}
+
+function chunkOutput(request: MediaRequest, durationMs: number | undefined): GeminiOutput {
+  return {
+    schema: request.kind === 'transcription' ? schemas.transcription : schemas.understanding,
+    maxOutputTokens: chunkOutputTokens(request, durationMs),
+  };
+}
+
+/** Response schema and optional output cap for one call. */
+interface GeminiOutput {
+  schema: JsonSchema;
+  maxOutputTokens?: number;
 }
 
 /** Response text plus the diagnostics recorded with any failure it causes. */
@@ -476,13 +537,18 @@ const enumValue = (value: unknown) =>
  * Extracts the response text, or raises a specific error for a blocked prompt, a refused or
  * truncated candidate, or an empty answer. Records finish reason and token usage, never content.
  */
-export function geminiReply(data: GeminiResponse, model: string): GeminiReply {
+export function geminiReply(
+  data: GeminiResponse,
+  model: string,
+  maxOutputTokens?: number,
+): GeminiReply {
   const usage = data.usageMetadata;
   const finishReason = enumValue(data.candidates?.[0]?.finishReason);
   const details: ErrorDetails = {
     provider,
     model,
     ...(finishReason ? { finishReason } : {}),
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
     ...(typeof usage?.promptTokenCount === 'number'
       ? { promptTokens: usage.promptTokenCount }
       : {}),
@@ -502,11 +568,12 @@ export function geminiReply(data: GeminiResponse, model: string): GeminiReply {
       false,
       { ...details, blockReason: blockReason ?? 'OTHER' },
     );
+  // Usually a repetition loop: the same request then succeeds, as a production retry showed.
   if (finishReason === 'MAX_TOKENS')
     throw new MediaError(
       'provider_output_truncated',
       'Gemini reached its output token limit before finishing the answer',
-      false,
+      true,
       details,
     );
   if (finishReason && blockedFinishReasons.has(finishReason))
@@ -529,7 +596,7 @@ async function generateGemini(
   apiKey: string,
   parts: unknown[],
   signal: AbortSignal,
-  responseJsonSchema: JsonSchema,
+  output: GeminiOutput,
 ): Promise<GeminiReply> {
   const response = await checked(
     `${geminiRoot}/v1beta/models/${encodeURIComponent(model)}:generateContent`,
@@ -542,10 +609,18 @@ async function generateGemini(
       },
       body: JSON.stringify({
         contents: [{ role: 'user', parts }],
-        generationConfig: { responseMimeType: 'application/json', responseJsonSchema },
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: output.schema,
+          ...(output.maxOutputTokens ? { maxOutputTokens: output.maxOutputTokens } : {}),
+        },
       }),
     },
     provider,
   );
-  return geminiReply((await readJson(response, provider, signal)) as GeminiResponse, model);
+  return geminiReply(
+    (await readJson(response, provider, signal)) as GeminiResponse,
+    model,
+    output.maxOutputTokens,
+  );
 }
