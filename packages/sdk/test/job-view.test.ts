@@ -167,6 +167,25 @@ describe('job stage and next steps', () => {
     ]);
   });
 
+  it('offers retry before an alternative provider for a truncated chunk', async () => {
+    const { sdk, provider } = fixture({ chunkConcurrency: 1 });
+    provider.process.mockResolvedValueOnce(structuredClone(output)).mockRejectedValueOnce(
+      new MediaError('provider_output_truncated', 'Gemini reached its output token limit', true, {
+        finishReason: 'MAX_TOKENS',
+        outputTokens: 29_700,
+        calls: 3,
+      }),
+    );
+    const job = await sdk.submit('alice', request);
+    await sdk.runNext();
+    const failed = await sdk.get('alice', job.id);
+    expect(failed.error?.nextSteps?.map((step) => [step.operation, step.input])).toEqual([
+      ['retry', { id: job.id }],
+      ['submit', { request: expect.objectContaining({ provider: 'openai' }) }],
+    ]);
+    expect(failed.error?.nextSteps?.[0]?.reason).toContain('reuses 1 completed chunks');
+  });
+
   it('never suggests an alternative the provider does not offer', async () => {
     const { sdk, provider } = fixture();
     provider.alternatives.mockReturnValue([]);

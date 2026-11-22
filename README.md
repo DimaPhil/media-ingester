@@ -65,7 +65,7 @@ Gemini preserves video for native video transcription and understanding. Subscri
 # Development CLI:
 pnpm cli --help
 # Released CLI (self-contained, no unpublished workspace dependencies):
-npm install -g ./media-ingest-cli-1.6.0.tgz
+npm install -g ./media-ingest-cli-1.6.1.tgz
 export MEDIA_API_URL=http://localhost:4000
 # Set MEDIA_API_TOKEN securely, or use media setup --token-stdin.
 media transcribe ./recording.mp3 --idempotency-key recording-001

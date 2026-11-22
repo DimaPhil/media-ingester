@@ -22,7 +22,7 @@ Use `media` for the deployed service. Processing runs on the server; the CLI upl
 | `provider_http_error`                                                  | Provider HTTP status in `details.httpStatus`; retryable for 408, 429, 5xx | Retry later, or another provider                |
 | `provider_timeout`, `provider_unavailable`                             | Provider deadline passed or network failed                                | Retry                                           |
 | `provider_invalid_output`, `invalid_provider_output`                   | Model output unusable after three calls, or timestamps outside the chunk  | Retry; completed chunks are reused              |
-| `provider_output_truncated`                                            | Output token limit reached                                                | Another provider or shorter media               |
+| `provider_output_truncated`                                            | Output token limit reached, usually a model repetition loop               | Retry, then another provider                    |
 | `provider_blocked`                                                     | Prompt or answer refused (`finishReason`/`blockReason` in details)        | Another provider, or change the input or prompt |
 | `provider_not_configured`                                              | Server lacks that provider's credential                                   | Another provider; tell the operator             |
 | `subscription_*`                                                       | Native Codex/Claude login, limits or timeouts                             | Operator action or retry; no paid fallback      |

@@ -10,7 +10,7 @@ import {
   parseModelJson,
   parseOpenAi,
 } from '../src/providers.js';
-import { toClipTime } from '../src/providers/gemini.js';
+import { chunkOutputTokens, toClipTime, translationOutputTokens } from '../src/providers/gemini.js';
 import type { MediaRequest } from '@media-ingest/contracts';
 import { MediaError } from '@media-ingest/sdk';
 
@@ -729,16 +729,74 @@ describe('Gemini structured output and failures', () => {
     });
   });
 
-  it('reports truncation and refusals once, without asking again', async () => {
+  it('asks again for a truncated chunk, then fails retryable after the call budget', async () => {
+    // Production: one 10-minute chunk looped to 65,352 output tokens; the next request succeeded.
+    const looping = () => geminiResponse('{"text":"да да да', 'MAX_TOKENS');
+    const recovering = vi
+      .fn()
+      .mockImplementationOnce(async () => looping())
+      .mockImplementationOnce(async () => geminiResponse(validTranscript));
+    vi.stubGlobal('fetch', recovering);
+    expect((await run()).detectedLanguage).toBe('ru');
+    expect(recovering).toHaveBeenCalledTimes(2);
+    const truncated = vi.fn().mockImplementation(async () => looping());
+    vi.stubGlobal('fetch', truncated);
+    await expect(run()).rejects.toMatchObject({
+      code: 'provider_output_truncated',
+      retryable: true,
+      details: {
+        finishReason: 'MAX_TOKENS',
+        outputTokens: 5_012,
+        maxOutputTokens: chunkOutputTokens(gemini, 10_000),
+        calls: 3,
+      },
+    });
+    expect(truncated).toHaveBeenCalledTimes(3);
+  });
+
+  it('caps output by chunk duration so a repetition loop stops early', async () => {
+    expect(chunkOutputTokens(gemini, 600_000)).toBe(8_192 + 21_600);
+    expect(chunkOutputTokens({ ...gemini, kind: 'understanding', prompt: 'p' }, 600_000)).toBe(
+      16_384 + 21_600,
+    );
+    expect(chunkOutputTokens(gemini, 40)).toBe(8_192 + 2);
+    expect(chunkOutputTokens(gemini, undefined)).toBe(chunkOutputTokens(gemini, 600_000));
+    expect(chunkOutputTokens(gemini, 3 * 3_600_000)).toBe(65_536);
+    expect(translationOutputTokens('x'.repeat(10_000))).toBe(8_192 + 5_000);
+    expect(translationOutputTokens('x'.repeat(1_000_000))).toBe(65_536);
+    const fetcher = vi.fn().mockImplementation(async () => geminiResponse(validTranscript));
+    vi.stubGlobal('fetch', fetcher);
+    await run();
+    const providers = new NodeProviders({ geminiApiKey: 'key' });
+    fetcher.mockImplementation(async () => geminiResponse('{"text":"Whole","timeRanges":[]}'));
+    const understanding = { ...gemini, kind: 'understanding' as const, prompt: 'Summarize' };
+    await providers.synthesize(
+      { durationMs: 1000, startMs: 0, endMs: 1000, final: true, parts: [] },
+      understanding,
+      context,
+    );
+    fetcher.mockImplementation(async () => geminiResponse('{"translatedText":"готово"}'));
+    await providers.translate('done', { ...gemini, targetLanguage: 'ru' }, context);
+    const caps = fetcher.mock.calls.map(
+      (call) => JSON.parse(call[1].body).generationConfig.maxOutputTokens,
+    );
+    expect(caps[0]).toBe(chunkOutputTokens(gemini, 10_000));
+    expect(caps[1]).toBeUndefined();
+    expect(caps[2]).toBeGreaterThan(8_192);
+  });
+
+  it('reports truncated synthesis and refusals once, without asking again', async () => {
     const truncated = vi
       .fn()
       .mockImplementation(async () => geminiResponse('{"text":"partial', 'MAX_TOKENS'));
     vi.stubGlobal('fetch', truncated);
-    await expect(run()).rejects.toMatchObject({
-      code: 'provider_output_truncated',
-      retryable: false,
-      details: { finishReason: 'MAX_TOKENS', outputTokens: 5_012 },
-    });
+    await expect(
+      new NodeProviders({ geminiApiKey: 'key' }).synthesize(
+        { durationMs: 1000, startMs: 0, endMs: 1000, final: true, parts: [] },
+        { ...gemini, kind: 'understanding', prompt: 'Summarize' },
+        context,
+      ),
+    ).rejects.toMatchObject({ code: 'provider_output_truncated', retryable: true });
     expect(truncated).toHaveBeenCalledTimes(1);
     for (const finishReason of ['SAFETY', 'RECITATION', 'PROHIBITED_CONTENT', 'SPII']) {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(geminiResponse(undefined, finishReason)));
