@@ -1,8 +1,13 @@
 import { readFile, stat } from 'node:fs/promises';
 import type { MediaRequest } from '@media-ingest/contracts';
-import type { AdapterContext, Artifact, ChunkOutput } from '@media-ingest/sdk';
+import {
+  MediaError,
+  type AdapterContext,
+  type Artifact,
+  type ChunkOutput,
+} from '@media-ingest/sdk';
 import { googleAccessToken } from '../google-auth.js';
-import { checked, key, parseChunk } from './shared.js';
+import { checked, conform, key, parseChunk, readJson } from './shared.js';
 import { ApiProvider, type ApiTranslation } from './api-provider.js';
 
 interface GoogleSpeechOptions {
@@ -40,36 +45,48 @@ export class GoogleSpeechProvider extends ApiProvider {
     request: MediaRequest,
     context: AdapterContext,
   ): Promise<ChunkOutput> {
-    if (request.kind !== 'transcription') throw new Error('Understanding requires Gemini');
+    if (request.kind !== 'transcription')
+      throw new MediaError('invalid_request', 'Understanding requires Gemini');
     const model = this.resolveModel(request);
-    const signal = this.signal(context);
     const options = this.options;
     if ((await stat(artifact.uri)).size > 10 * 1024 * 1024)
-      throw new Error('Google Speech synchronous chunk exceeds 10 MiB');
+      throw new MediaError(
+        'media_too_large',
+        'Google Speech synchronous chunk exceeds 10 MiB',
+        false,
+        { provider: 'google-speech' },
+      );
     const recognizer =
       options.googleRecognizer ??
       `projects/${key(options.googleProject, 'GOOGLE_CLOUD_PROJECT')}/locations/global/recognizers/_`;
     if (!/^projects\/[\w-]+\/locations\/[\w-]+\/recognizers\/[\w-]+$/.test(recognizer))
-      throw new Error('Invalid Google Speech recognizer');
+      throw new MediaError('invalid_configuration', 'Invalid Google Speech recognizer');
     const location = recognizer.split('/')[3]!;
     const host =
       location === 'global' ? 'speech.googleapis.com' : `${location}-speech.googleapis.com`;
     const token = await googleAccessToken(options.googleCredentials);
-    const response = await checked(`https://${host}/v2/${recognizer}:recognize`, {
-      method: 'POST',
-      signal,
-      headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        config: {
-          autoDecodingConfig: {},
-          languageCodes: [request.inputLanguage ?? 'auto'],
-          model,
-          features: { enableWordTimeOffsets: true },
+    const content = (await readFile(artifact.uri)).toString('base64');
+    const payload = (await this.withDeadline(context, async (signal) => {
+      const response = await checked(
+        `https://${host}/v2/${recognizer}:recognize`,
+        {
+          method: 'POST',
+          signal,
+          headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            config: {
+              autoDecodingConfig: {},
+              languageCodes: [request.inputLanguage ?? 'auto'],
+              model,
+              features: { enableWordTimeOffsets: true },
+            },
+            content,
+          }),
         },
-        content: (await readFile(artifact.uri)).toString('base64'),
-      }),
-    });
-    const payload = (await response.json()) as {
+        'google-speech',
+      );
+      return readJson(response, 'google-speech', signal);
+    })) as {
       results?: Array<{
         languageCode?: string;
         alternatives?: Array<{
@@ -106,10 +123,15 @@ export class GoogleSpeechProvider extends ApiProvider {
         },
       ];
     });
-    return parseChunk({
-      text: transcripts.join(' '),
-      segments,
-      detectedLanguage: results.find((result) => result.languageCode)?.languageCode ?? null,
-    });
+    return conform(
+      {
+        text: transcripts.join(' '),
+        segments,
+        detectedLanguage: results.find((result) => result.languageCode)?.languageCode ?? null,
+      },
+      parseChunk,
+      'google-speech',
+      { model },
+    );
   }
 }

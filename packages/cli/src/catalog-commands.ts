@@ -3,6 +3,7 @@ import type { Command } from 'commander';
 import type { MediaClient } from '@media-ingest/client';
 import { operations, operationIds } from '@media-ingest/contracts';
 import { uploadFile } from './media-commands.js';
+import { UsageError } from './output.js';
 
 type JsonOptions = { input?: string; file?: string };
 
@@ -10,7 +11,7 @@ async function inputJSON(
   options: JsonOptions,
   stdin: () => Promise<string>,
 ): Promise<Record<string, unknown>> {
-  if (options.input && options.file) throw new Error('Use either --input or --file');
+  if (options.input && options.file) throw new UsageError('Use either --input or --file');
   const text =
     options.input ??
     (options.file === '-'
@@ -22,10 +23,10 @@ async function inputJSON(
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error('Input must be valid JSON');
+    throw new UsageError('Input must be valid JSON');
   }
   if (!data || typeof data !== 'object' || Array.isArray(data))
-    throw new Error('Input must be a JSON object');
+    throw new UsageError('Input must be a JSON object');
   return data as Record<string, unknown>;
 }
 export function registerCatalogCommands(
@@ -50,14 +51,14 @@ export function registerCatalogCommands(
       const options = args[positional ? 1 : 0] as JsonOptions;
       if (id === 'upload' && value) {
         if (options.input || options.file)
-          throw new Error('Use upload <path> or a JSON request, not both');
+          throw new UsageError('Use upload <path> or a JSON request, not both');
         print(await uploadFile(await client(), value));
         return;
       }
       const input = await inputJSON(options, stdin);
       if (value) {
         if (input.id !== undefined && input.id !== value)
-          throw new Error('Positional ID conflicts with JSON ID');
+          throw new UsageError('Positional ID conflicts with JSON ID');
         input.id = value;
       }
       // Runtime catalog validation remains authoritative, including newly added commands.

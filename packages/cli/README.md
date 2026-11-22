@@ -23,6 +23,8 @@ Successful outputs and available media metadata remain in processing history aft
 
 `transcribe` and `understand` reuse the newest saved result for the same media and settings (understanding also matches the exact prompt). Such jobs complete without processing and report `cachedFrom`. Pass `--force`, or `"force": true` in a `submit` request, to process from scratch.
 
+Output is JSON on stdout; progress such as upload notices goes to stderr. A failed command prints `{"error":{"code","message","details"?},"help":[...]}` and exits 1; usage and input errors exit 2 and list the valid options. Job views include `stage` and suggested `nextSteps`; the CLI renders those as a top-level `help` list of `media` commands, for example `media get <id>  # after 30s: Job is processing (3/18 chunks done)` or `media retry <id>`. `media <command> --help` shows examples.
+
 `media <operation> --input '<json>'` and `--file request.json` cover every catalog operation. `--file -` reads JSON from stdin. `get` and `retry` also accept a positional job ID; `upload` accepts a local path. Local uploads and inline downloads are limited to 32 MiB. `download` emits base64 in JSON; remote-source processing can handle larger media within server limits. Save the submission's ID and poll `get`; submission does not wait for processing.
 
 ## Completion

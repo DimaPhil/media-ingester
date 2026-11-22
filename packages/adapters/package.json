@@ -1,6 +1,6 @@
 {
   "name": "@media-ingest/adapters",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "files": [
     "dist",
     "migrations"

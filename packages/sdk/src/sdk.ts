@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  jobSchema,
   requestSchema,
   historyInputSchema,
   type JobView,
@@ -10,6 +9,7 @@ import {
 import { MediaError } from './errors.js';
 import { MemoryJobRepository } from './memory-repository.js';
 import { JobWorker } from './worker.js';
+import { jobView } from './job-view.js';
 import { runWorkerLoops, WorkSignal, type WorkerLoopOptions } from './workers.js';
 import type { JobRecord, JobRepository, ListJobs, SdkOptions } from './ports.js';
 
@@ -49,6 +49,7 @@ export class MediaSdk {
       requestHash,
       request,
       status: 'queued',
+      stage: 'queued',
       createdAt: timestamp,
       updatedAt: timestamp,
       attempt: 0,
@@ -62,7 +63,7 @@ export class MediaSdk {
       leaseToken: null,
       leaseExpiresAt: null,
     };
-    const stored = jobSchema.parse(await this.repository.enqueue(job));
+    const stored = this.view(await this.repository.enqueue(job));
     // Also wakes idle hosts for replays: their idle hook can release a republished upload.
     this.wake();
     return stored;
@@ -71,19 +72,24 @@ export class MediaSdk {
   async get(ownerId: string, id: string): Promise<JobView> {
     const job = await this.repository.get(ownerId, id);
     if (!job) throw new MediaError('not_found', 'Job not found');
-    return jobSchema.parse(job);
+    return this.view(job);
   }
 
   async list(ownerId: string, input: ListJobs = { limit: 20 }): Promise<JobView[]> {
     if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100)
       throw new MediaError('invalid_request', 'Limit must be between 1 and 100');
-    return (await this.repository.list(ownerId, input)).map((job) => jobSchema.parse(job));
+    return (await this.repository.list(ownerId, input)).map((job) => this.view(job));
   }
 
   async retry(ownerId: string, id: string): Promise<JobView> {
-    const job = jobSchema.parse(await this.repository.retry(ownerId, id, this.now()));
+    const job = this.view(await this.repository.retry(ownerId, id, this.now()));
     this.wake();
     return job;
+  }
+
+  /** Public view with derived stage and suggested next calls; alternatives come from the provider. */
+  private view(job: JobRecord): JobView {
+    return jobView(job, this.options.provider.alternatives?.(job.request) ?? []);
   }
 
   history(ownerId: string, input: ListHistory = { limit: 20 }) {

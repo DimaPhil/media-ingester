@@ -268,8 +268,27 @@ describe('SDK execution', () => {
     provider.process.mockRejectedValue(new Error('Provider returned HTTP 401'));
     const job = await sdk.submit('alice', request);
     await sdk.runNext();
-    expect(onProcessingError).toHaveBeenCalledWith(job.id, expect.any(Error));
-    expect((await sdk.get('alice', job.id)).status).toBe('failed');
+    expect(onProcessingError).toHaveBeenCalledWith(
+      job.id,
+      expect.any(Error),
+      expect.objectContaining({ code: 'processing_failed', retryable: true }),
+    );
+    const failed = await sdk.get('alice', job.id);
+    expect(failed).toMatchObject({ status: 'failed', stage: 'failed' });
+    // Unknown errors keep the generic code but record their class and where they happened.
+    expect(failed.error?.details).toMatchObject({
+      errorName: 'Error',
+      stage: 'processing',
+      provider: 'openai',
+      model: 'test-model',
+      attempt: 1,
+      chunkIndex: 0,
+      chunkStartMs: 0,
+      chunkEndMs: 1000,
+    });
+    expect(failed.error?.nextSteps).toEqual([
+      { operation: 'retry', input: { id: job.id }, reason: expect.stringContaining('transient') },
+    ]);
   });
 
   it('records the causal provider failure after a lower-index sibling rejects on cancellation', async () => {
@@ -306,11 +325,24 @@ describe('SDK execution', () => {
     });
     const job = await sdk.submit('alice', request);
     await sdk.runNext();
-    expect(onProcessingError).toHaveBeenCalledWith(job.id, cause);
+    expect(onProcessingError).toHaveBeenCalledWith(
+      job.id,
+      cause,
+      expect.objectContaining({ code: 'provider_rejected' }),
+    );
     expect((await sdk.get('alice', job.id)).error).toEqual({
       code: 'provider_rejected',
       message: 'Provider rejected the media',
       retryable: false,
+      details: {
+        stage: 'processing',
+        attempt: 1,
+        provider: 'openai',
+        model: 'test-model',
+        chunkIndex: 1,
+        chunkStartMs: 1000,
+        chunkEndMs: 2000,
+      },
     });
     expect(base.media.cleanup).toHaveBeenCalledOnce();
   });

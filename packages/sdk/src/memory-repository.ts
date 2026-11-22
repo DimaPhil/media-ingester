@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   MediaResult,
-  JobView,
+  JobError,
   ProcessedMedia,
   ProcessedMediaDetails,
   ListHistory,
@@ -19,6 +19,7 @@ import type {
   ResultLookup,
 } from './ports.js';
 import { makeProcessedMedia, summarizeProcessedMedia } from './history.js';
+import type { RunningStage } from './job-view.js';
 
 /** Reference implementation: mutations run synchronously before their promises resolve. */
 export class MemoryJobRepository implements JobRepository {
@@ -70,6 +71,7 @@ export class MemoryJobRepository implements JobRepository {
     const token = randomUUID();
     Object.assign(job, {
       status: 'running',
+      stage: 'resolving',
       leaseToken: token,
       leaseExpiresAt: now + leaseMs,
       attempt: job.attempt + 1,
@@ -132,6 +134,7 @@ export class MemoryJobRepository implements JobRepository {
       throw new MediaError('not_found', 'Cached result not found');
     Object.assign(job, {
       status: 'completed',
+      stage: 'completed',
       result: structuredClone(cached.result),
       cachedFrom: cached.id,
       error: null,
@@ -157,6 +160,10 @@ export class MemoryJobRepository implements JobRepository {
     this.fenced(id, token, now).leaseExpiresAt = now + leaseMs;
   }
 
+  async saveStage(id: string, token: string, stage: RunningStage, now: number): Promise<void> {
+    this.fenced(id, token, now).stage = stage;
+  }
+
   async savePlan(
     id: string,
     token: string,
@@ -175,6 +182,7 @@ export class MemoryJobRepository implements JobRepository {
     job.plan = structuredClone(plan);
     job.sourceFingerprint = sourceFingerprint;
     job.totalChunks = plan.length;
+    job.stage = 'processing';
   }
 
   async saveChunk(
@@ -204,6 +212,7 @@ export class MemoryJobRepository implements JobRepository {
     const record = makeProcessedMedia(job, result, now, media);
     Object.assign(job, {
       status: 'completed',
+      stage: 'completed',
       result: structuredClone(result),
       error: null,
       leaseToken: null,
@@ -212,14 +221,10 @@ export class MemoryJobRepository implements JobRepository {
     this.results.set(id, { ownerId: job.ownerId, record });
   }
 
-  async fail(
-    id: string,
-    token: string,
-    error: NonNullable<JobView['error']>,
-    now: number,
-  ): Promise<void> {
+  async fail(id: string, token: string, error: JobError, now: number): Promise<void> {
     Object.assign(this.fenced(id, token, now), {
       status: 'failed',
+      stage: 'failed',
       error: structuredClone(error),
       leaseToken: null,
       leaseExpiresAt: null,
@@ -231,7 +236,12 @@ export class MemoryJobRepository implements JobRepository {
     if (!job || job.ownerId !== ownerId) throw new MediaError('not_found', 'Job not found');
     if (job.status !== 'failed')
       throw new MediaError('conflict', 'Only failed jobs can be retried');
-    Object.assign(job, { status: 'queued', error: null, updatedAt: new Date(now).toISOString() });
+    Object.assign(job, {
+      status: 'queued',
+      stage: 'queued',
+      error: null,
+      updatedAt: new Date(now).toISOString(),
+    });
     return structuredClone(job);
   }
 }

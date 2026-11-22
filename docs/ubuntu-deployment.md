@@ -76,3 +76,13 @@ docker compose up -d
 ```
 
 The migration explicitly creates the application's schema. Startup checks it. Verify the deployed origin's `/healthz`, authenticated `info` and one representative job through the intended provider. For subscription jobs, complete native login in the dedicated Compose volumes first.
+
+## Read job failures
+
+Each failed attempt writes one JSON line to the container log, without content, tokens or source URLs ([ADR 0014](adr/0014-agent-facing-errors-and-progress.md)). Version 1.6.0 replaced the earlier `Job processing failed <id> <ErrorName>` text. Filter by event:
+
+```sh
+docker compose logs api --since 24h | grep '"event":"job_failed"'
+```
+
+A line carries `jobId`, `code`, `retryable`, `errorName`, the service's own message for known errors, and details such as `stage`, `attempt`, `provider`, `model`, `chunkIndex`, `chunkStartMs`, `chunkEndMs`, `finishReason`, `promptTokens`, `outputTokens`, `httpStatus`, `parseErrorPosition` and `calls`. The same code and details appear in the job's `error` for API, MCP and CLI callers.

@@ -29,7 +29,12 @@ export { parseOpenAi } from './providers/openai.js';
 
 /** Registry members implement format selection and translation as well as chunk processing. */
 /** Optional capabilities; an override without them keeps the default download-and-concatenate path. */
-type OptionalCapability = 'sourceMedia' | 'synthesize' | 'remoteMedia' | 'processRemote';
+type OptionalCapability =
+  | 'sourceMedia'
+  | 'synthesize'
+  | 'remoteMedia'
+  | 'processRemote'
+  | 'alternatives';
 export type NodeProviderAdapter = Required<Omit<ProviderAdapter, OptionalCapability>> &
   Pick<ProviderAdapter, OptionalCapability>;
 
@@ -64,8 +69,12 @@ export const BUILTIN_PROVIDER_CAPABILITIES = {
   'claude-code': ClaudeCodeProvider.capabilities,
 } as const;
 
+/** Paid API providers, in the order suggested as alternatives. */
+const apiProviders = ['openai', 'google-gemini', 'google-speech'] as const;
+
 export class NodeProviders implements NodeProviderAdapter {
   private readonly providers: Record<MediaRequest['provider'], NodeProviderAdapter>;
+  private readonly configured: ReadonlySet<MediaRequest['provider']>;
 
   constructor(options: NodeProviderOptions = {}) {
     const { models, timeoutMs, overrides } = options;
@@ -107,6 +116,31 @@ export class NodeProviders implements NodeProviderAdapter {
         overrides?.['claude-code'] ??
         new ClaudeCodeProvider(options.subscription, models?.claudeUnderstanding),
     };
+    this.configured = new Set(
+      apiProviders.filter(
+        (id) =>
+          overrides?.[id] ||
+          {
+            openai: options.openaiApiKey,
+            'google-gemini': options.geminiApiKey,
+            'google-speech': options.googleRecognizer ?? options.googleProject,
+          }[id],
+      ),
+    );
+  }
+
+  /**
+   * Configured API providers that support the request kind. A subscription request gets none:
+   * subscription work never moves to a paid API, not even as a suggestion.
+   */
+  alternatives(request: MediaRequest): MediaRequest['provider'][] {
+    if (!(apiProviders as readonly string[]).includes(request.provider)) return [];
+    return apiProviders.filter(
+      (id) =>
+        id !== request.provider &&
+        this.configured.has(id) &&
+        BUILTIN_PROVIDER_CAPABILITIES[id][request.kind],
+    );
   }
 
   resolveModel(request: MediaRequest) {

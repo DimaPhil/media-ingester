@@ -30,6 +30,18 @@
       "prompt": "Use my Codex subscription to transcribe ./meeting.wav. What transcription model did it use?",
       "expected_output": "Submit provider codex, poll completion, and report result provenance. Explain codex-realtime-v3 is the route, with unknown backend model, rather than attributing ASR to the reasoning model.",
       "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "My Gemini transcription job failed with provider_invalid_output on chunk 7. What now?",
+      "expected_output": "Read error.details and error.nextSteps from media get; report the chunk and finish reason, run media retry because the error is retryable and completed chunks are reused. Suggest the alternative provider only with the user's consent because it uses another quota.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "Check on job 00000000-0000-4000-8000-000000000000 until it finishes.",
+      "expected_output": "Poll media get at the pollAfterSeconds interval from nextSteps, report stage and completedChunks/totalChunks, and report the result only when status is completed.",
+      "files": []
     }
   ]
 }

@@ -6,7 +6,7 @@ import {
   type SynthesisInput,
   type SynthesisOutput,
 } from '@media-ingest/sdk';
-import type { MediaRequest } from '@media-ingest/contracts';
+import type { ErrorDetails, MediaRequest } from '@media-ingest/contracts';
 
 export function assertSelectedProvider(request: MediaRequest, provider: MediaRequest['provider']) {
   if (request.provider !== provider)
@@ -24,6 +24,52 @@ const chunkSchema = z.object({
 export function parseChunk(value: unknown): ChunkOutput {
   return chunkSchema.parse(value);
 }
+
+/** Output a provider returned that this service cannot use; asking again may succeed. */
+export function invalidOutput(provider: string, reason: string, details: ErrorDetails = {}) {
+  return new MediaError(
+    'provider_invalid_output',
+    `${provider} returned unusable output: ${reason}`,
+    true,
+    { provider, ...details },
+  );
+}
+
+/** Parses model JSON text; a syntax error becomes `provider_invalid_output` with its position. */
+export function decodeModelJson(text: string, provider: string, details: ErrorDetails = {}) {
+  try {
+    return parseModelJson(text);
+  } catch (error) {
+    const position = /position (\d+)/.exec(error instanceof Error ? error.message : '')?.[1];
+    throw invalidOutput(provider, 'response is not valid JSON', {
+      ...details,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      outputChars: text.length,
+      ...(position ? { parseErrorPosition: Number(position) } : {}),
+    });
+  }
+}
+
+/** Applies an output parser; a schema mismatch becomes `provider_invalid_output`. */
+export function conform<T>(
+  value: unknown,
+  parse: (value: unknown) => T,
+  provider: string,
+  details: ErrorDetails = {},
+): T {
+  try {
+    return parse(value);
+  } catch (error) {
+    if (!(error instanceof z.ZodError)) throw error;
+    // Issue paths name fields and indices only, never content.
+    const path = error.issues[0]?.path.join('.') ?? '';
+    throw invalidOutput(provider, 'response does not match the expected fields', {
+      ...details,
+      errorName: 'ZodError',
+      ...(path ? { schemaPath: path } : {}),
+    });
+  }
+}
 export function parseModelJson(text: string): unknown {
   return JSON.parse(
     text
@@ -32,17 +78,64 @@ export function parseModelJson(text: string): unknown {
       .replace(/\s*```$/, ''),
   );
 }
-export async function checked(url: string, init: RequestInit): Promise<Response> {
-  const response = await fetch(url, { ...init, redirect: 'error' });
-  if (!response.ok) throw new Error(`Provider returned HTTP ${response.status}`);
+/** A non-success HTTP status. 408, 429 and 5xx are worth retrying; the body is never kept. */
+export function httpError(provider: string, status: number) {
+  return new MediaError(
+    'provider_http_error',
+    `${provider} returned HTTP ${status}`,
+    status === 408 || status === 429 || status >= 500,
+    { provider, httpStatus: status },
+  );
+}
+
+/**
+ * Fetches without redirects. A non-success status becomes `provider_http_error`; a network
+ * failure becomes `provider_unavailable`. Cancellation and deadlines propagate unchanged.
+ */
+export async function checked(url: string, init: RequestInit, provider: string): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, redirect: 'error' });
+  } catch (error) {
+    if (init.signal?.aborted) throw error;
+    throw new MediaError(
+      'provider_unavailable',
+      `${provider} request failed before a response`,
+      true,
+      { provider, errorName: error instanceof Error ? error.name : 'UnknownError' },
+    );
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw httpError(provider, response.status);
+  }
   return response;
 }
+
+/** Reads a JSON response body; an unreadable body becomes `provider_invalid_output`. */
+export async function readJson(response: Response, provider: string, signal?: AbortSignal) {
+  try {
+    return (await response.json()) as unknown;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw invalidOutput(provider, 'response body is not JSON');
+  }
+}
+
 export function key(value: string | undefined, name: string): string {
-  if (!value) throw new Error(`${name} is not configured`);
+  if (!value)
+    throw new MediaError('provider_not_configured', `${name} is not configured`, false, {
+      setting: name,
+    });
   return value;
 }
-export function parseTranslation(text: string): string {
-  return z.object({ translatedText: z.string() }).parse(parseModelJson(text)).translatedText;
+const translationSchema = z.object({ translatedText: z.string() });
+export function parseTranslation(text: string, provider = 'translation'): string {
+  return conform(
+    decodeModelJson(text, provider),
+    (value) => translationSchema.parse(value),
+    provider,
+  ).translatedText;
 }
 
 /** Model output for one synthesis call; null labels keep the schema usable for strict CLIs. */

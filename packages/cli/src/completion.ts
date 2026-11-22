@@ -1,3 +1,4 @@
+import { UsageError } from './output.js';
 import { operationIds } from '@media-ingest/contracts';
 
 export const commandNames = [
@@ -31,5 +32,5 @@ export function completionScript(shell: string): string {
     return '#compdef media\n_media_complete() { local -a candidates; candidates=("${(@f)$(media __complete -- "${words[@]:1:$((CURRENT-1))}")}"); compadd -- "${candidates[@]}"; }\ncompdef _media_complete media\n';
   if (shell === 'fish')
     return 'function __media_complete\n  set -l words (commandline -opc)\n  set -e words[1]\n  media __complete -- $words (commandline -ct)\nend\ncomplete -c media -f -a "(__media_complete)"\n';
-  throw new Error('Supported shells: bash, zsh, fish');
+  throw new UsageError('Supported shells: bash, zsh, fish');
 }

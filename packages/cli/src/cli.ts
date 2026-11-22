@@ -8,11 +8,15 @@ import { registerCatalogCommands } from './catalog-commands.js';
 import { registerMediaCommands } from './media-commands.js';
 import { complete, completionScript } from './completion.js';
 import { loadConfig, saveConfig } from './config.js';
+import { addExamples, describeCliError, UsageError, withHelp } from './output.js';
 
 export { inferSource, uploadFile } from './media-commands.js';
 
 export interface CliIO {
+  /** Results and errors as JSON. */
   out: (value: string) => void;
+  /** Progress and diagnostics; defaults to `out` when absent. */
+  err?: (value: string) => void;
   stdin: () => Promise<string>;
   env: NodeJS.ProcessEnv;
 }
@@ -29,23 +33,37 @@ async function standardInput(): Promise<string> {
 }
 export const defaultIO: CliIO = {
   out: (value) => process.stdout.write(value + '\n'),
+  err: (value) => process.stderr.write(value + '\n'),
   stdin: standardInput,
   env: process.env,
 };
-export function createProgram(io: CliIO = defaultIO): Command {
+export interface ProgramOptions {
+  /** Leave error reporting to the caller, which prints one JSON error instead of commander text. */
+  jsonErrors?: boolean;
+}
+/** Commands throw instead of exiting the process; `runCli` turns failures into JSON and exit codes. */
+export function createProgram(io: CliIO = defaultIO, options: ProgramOptions = {}): Command {
+  const diagnostic = io.err ?? io.out;
+  // Subcommands copy these settings when they are created, so configure them first.
   const program = new Command()
     .name('media')
-    .description('Authenticated HTTP client for Media Ingest')
-    .version(RELEASE_VERSION);
-  program.configureOutput({
-    writeOut: (value) => io.out(value.trimEnd()),
-    writeErr: (value) => io.out(value.trimEnd()),
-  });
+    .description('Authenticated HTTP client for Media Ingest. Prints JSON to stdout.')
+    .version(RELEASE_VERSION)
+    .exitOverride()
+    .configureOutput({
+      writeOut: (value) => io.out(value.trimEnd()),
+      writeErr: (value) => diagnostic(value.trimEnd()),
+      ...(options.jsonErrors ? { outputError: () => {} } : {}),
+    });
+  program.addHelpText(
+    'after',
+    '\nErrors print {"error":{code,message,details?},"help":[...]} to stdout.\nExit codes: 0 success, 1 failure, 2 usage error. Job views list follow-up commands in "help".',
+  );
   const client = async () => new MediaClient(await loadConfig(io.env));
-  const print = (value: unknown) => io.out(JSON.stringify(value, null, 2));
+  const print = (value: unknown) => io.out(JSON.stringify(withHelp(value), null, 2));
 
   registerCatalogCommands(program, client, print, () => io.stdin());
-  registerMediaCommands(program, client, print);
+  registerMediaCommands(program, client, print, diagnostic);
   program
     .command('setup')
     .description('Save API URL and token with owner-only permissions')
@@ -53,7 +71,7 @@ export function createProgram(io: CliIO = defaultIO): Command {
     .option('--token-stdin', 'Read token from stdin; otherwise use MEDIA_API_TOKEN')
     .action(async (options: { url: string; tokenStdin?: boolean }) => {
       const token = options.tokenStdin ? (await io.stdin()).trim() : io.env.MEDIA_API_TOKEN;
-      if (!token) throw new Error('Supply the token through stdin or MEDIA_API_TOKEN');
+      if (!token) throw new UsageError('Supply the token through stdin or MEDIA_API_TOKEN');
       print({ configured: true, path: await saveConfig({ baseUrl: options.url, token }, io.env) });
     });
   program
@@ -61,7 +79,8 @@ export function createProgram(io: CliIO = defaultIO): Command {
     .description('Show command request/response JSON schemas without network access')
     .argument('[operation]')
     .action((id?: string) => {
-      if (id && !operationIds.includes(id as never)) throw new Error('Unknown operation');
+      if (id && !operationIds.includes(id as never))
+        throw new UsageError(`Unknown operation; choose one of ${operationIds.join(', ')}`);
       print(
         (id ? [id as keyof typeof operations] : operationIds).map((name) => ({
           name,
@@ -95,5 +114,29 @@ export function createProgram(io: CliIO = defaultIO): Command {
       );
       io.out(stdout.trimEnd());
     });
+  for (const command of program.commands) addExamples(command);
   return program;
+}
+
+/** Runs the CLI and returns its exit code; failures print one JSON error object to stdout. */
+export async function runCli(argv: string[], io: CliIO = defaultIO): Promise<number> {
+  const program = createProgram(io, { jsonErrors: true });
+  try {
+    await program.parseAsync(argv);
+    return 0;
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'exitCode' in error &&
+      error.exitCode === 0 &&
+      'code' in error &&
+      typeof error.code === 'string' &&
+      error.code.startsWith('commander.')
+    )
+      return 0;
+    const { envelope, exitCode } = describeCliError(error, program, argv);
+    io.out(JSON.stringify(envelope, null, 2));
+    return exitCode;
+  }
 }

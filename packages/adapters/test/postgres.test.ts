@@ -436,20 +436,34 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
       { index: 1, startMs: 1000, endMs: 2000 },
     ];
     const output = { text: 'hello', segments: [], timeRanges: [], detectedLanguage: 'en' };
+    const stage = async () => (await repository.get(pending.ownerId, pending.id))?.stage;
+    expect(await stage()).toBe('resolving');
+    await repository.saveStage(pending.id, lease.token, 'downloading', 2001);
+    expect(await stage()).toBe('downloading');
+    await expect(
+      repository.saveStage(pending.id, randomUUID(), 'inspecting', 2001),
+    ).rejects.toBeInstanceOf(LeaseLostError);
     await repository.savePlan(pending.id, lease.token, plan, 'sha256:original', 2001);
+    expect(await stage()).toBe('processing');
     await repository.saveChunk(pending.id, lease.token, 0, output, 2002);
     await repository.saveChunk(pending.id, lease.token, 0, output, 2003);
     expect((await repository.get(pending.ownerId, pending.id))?.completedChunks).toBe(1);
-    await repository.fail(
-      pending.id,
-      lease.token,
-      { code: 'temporary', message: 'temporary', retryable: true },
-      2004,
-    );
+    const failure = {
+      code: 'temporary',
+      message: 'temporary',
+      retryable: true,
+      details: { provider: 'openai', chunkIndex: 1, httpStatus: 503 },
+    };
+    await repository.fail(pending.id, lease.token, failure, 2004);
+    expect(await repository.get(pending.ownerId, pending.id)).toMatchObject({
+      stage: 'failed',
+      error: failure,
+    });
     await expect(repository.retry('other', pending.id, 2005)).rejects.toMatchObject({
       code: 'not_found',
     });
     await repository.retry(pending.ownerId, pending.id, 2005);
+    expect(await stage()).toBe('queued');
     const retry = (await repository.claim(2006, 60_000))!;
     expect(retry.job.chunks['0']).toEqual(output);
     // JSONB may return chunk properties in a different order from the submitted plan.
@@ -475,6 +489,7 @@ describe.skipIf(!url)('PostgreSQL persistence integration', () => {
     await repository.saveChunk(pending.id, retry.token, 1, output, 2008);
     await repository.complete(pending.id, retry.token, result, 2009);
     expect((await repository.get(pending.ownerId, pending.id))?.result).toEqual(result);
+    expect(await stage()).toBe('completed');
     await expect(repository.retry(pending.ownerId, pending.id, 2010)).rejects.toMatchObject({
       code: 'conflict',
     });

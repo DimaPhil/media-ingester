@@ -13,6 +13,7 @@ import { createApplication } from './application.js';
 import { drainAll, startMaintenance } from './background.js';
 import { loadConfig } from './config.js';
 import { createUploadStorage } from './upload-storage.js';
+import { jobFailureLog } from './logging.js';
 
 const config = loadConfig();
 const sql = postgres(config.DATABASE_URL, { max: 10 });
@@ -72,17 +73,7 @@ const sdk = new MediaSdk({
   provider,
   chunkConcurrency: config.MEDIA_CHUNK_CONCURRENCY,
   onCleanupError: () => console.error('Workspace cleanup failed'),
-  onProcessingError: (jobId, error) =>
-    console.error(
-      'Job processing failed',
-      jobId,
-      error instanceof Error &&
-        /^(?:Provider|Source service) returned HTTP \d{3}$/.test(error.message)
-        ? error.message
-        : error instanceof Error
-          ? error.name
-          : 'UnknownError',
-    ),
+  onProcessingError: (jobId, error, failure) => console.error(jobFailureLog(jobId, error, failure)),
 });
 const authStore = new PostgresAuthStore(sql);
 const UPLOAD_BATCH = 32;
